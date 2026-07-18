@@ -1,7 +1,7 @@
 {
   "name": "vtgl",
   "version": "0.0.0",
-  "description": "Standalone glyph-atlas terminal renderer. VT state in, pixels and input events out.",
+  "description": "Standalone WebGL2 glyph-atlas terminal renderer driven by a pluggable read-only VT source.",
   "type": "module",
   "license": "MIT",
   "exports": {

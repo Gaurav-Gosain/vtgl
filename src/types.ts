@@ -249,6 +249,17 @@ export interface Renderer {
    */
   render(source: VtSource, viewportY: number): void;
 
+  /**
+   * Ask for a render on the next animation frame, coalescing repeat requests
+   * within one frame into a single render. Prefer this over render() on any
+   * path driven by inbound data or input; render() stays available for callers
+   * that already own a frame loop.
+   */
+  requestRender(source: VtSource, viewportY: number): void;
+
+  /** Render any frame booked by requestRender right now. */
+  flushRender(): void;
+
   /** Reconfigure grid size and device pixel ratio. Forces a full redraw. */
   resize(cols: number, rows: number, dpr: number): void;
 
