@@ -67,6 +67,12 @@ export class InstanceBuffers {
   decoF32 = new Float32Array(0);
   decoU32 = new Uint32Array(0);
 
+  // Persistent byte views for partial uploads. Held here so the per-frame
+  // upload path never allocates a view object.
+  bgBytes = new Uint8Array(0);
+  glyphBytes = new Uint8Array(0);
+  decoBytes = new Uint8Array(0);
+
   // Device-pixel geometry, set via configure().
   private cellW = 0;
   private cellH = 0;
@@ -87,6 +93,9 @@ export class InstanceBuffers {
       this.decoBuf = new ArrayBuffer(cap * DECO_PER_CELL * DECO_UNITS * 4);
       this.decoF32 = new Float32Array(this.decoBuf);
       this.decoU32 = new Uint32Array(this.decoBuf);
+      this.bgBytes = new Uint8Array(this.bg.buffer);
+      this.glyphBytes = new Uint8Array(this.glyphBuf);
+      this.decoBytes = new Uint8Array(this.decoBuf);
     }
   }
 

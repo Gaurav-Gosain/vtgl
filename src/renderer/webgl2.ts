@@ -12,7 +12,7 @@
 import { CellFlags } from '../types.ts';
 import { Emitter } from '../events.ts';
 import { computeCellMetrics } from './metrics.ts';
-import { InstanceBuffers, GLYPH_UNITS, DECO_UNITS } from './instances.ts';
+import { InstanceBuffers, GLYPH_UNITS, DECO_UNITS, DECO_PER_CELL } from './instances.ts';
 import { styleMask } from '../atlas/key.ts';
 import { GlyphAtlas } from '../atlas/glyph-atlas.ts';
 import type { RasterFont } from '../atlas/glyph-atlas.ts';
@@ -29,6 +29,7 @@ import {
 } from '../gl/shaders.ts';
 import type {
   CellCoord,
+  CursorShape,
   Metrics,
   PixelRect,
   Renderer,
@@ -116,6 +117,7 @@ export class WebGL2Renderer implements Renderer {
   private curVisible = false;
   private curVr = 0;
   private curX = 0;
+  private curShape: CursorShape = 'block';
   private curGlyphRect: AtlasRect | null = null;
 
   private readonly onLost = (e: Event): void => {
@@ -219,11 +221,14 @@ export class WebGL2Renderer implements Renderer {
     const atlas = this.atlas!;
     atlas.beginFrame();
 
-    const { full, dirtyRows, glyphs } = this.buildFrame(source, viewportY);
-    this.uploadInstances(full);
-    const drawCalls = this.draw(source, viewportY);
-
+    // Clear the flag before building: buildFrame may legitimately re-arm it to
+    // request another full frame (for example after an atlas flush).
+    const wasFull = this.forceFull;
     this.forceFull = false;
+
+    const { full, dirtyRows, glyphs } = this.buildFrame(source, viewportY, wasFull);
+    this.uploadInstances(full);
+    const drawCalls = this.draw();
 
     const stats: RenderStats = {
       dirtyRows,
@@ -245,9 +250,10 @@ export class WebGL2Renderer implements Renderer {
   private buildFrame(
     source: VtSource,
     viewportY: number,
+    initialFull: boolean,
   ): { full: boolean; dirtyRows: number; glyphs: number } {
     const atlas = this.atlas!;
-    let full = this.forceFull;
+    let full = initialFull;
     let glyphs = 0;
     let dirtyRows = 0;
 
@@ -271,6 +277,9 @@ export class WebGL2Renderer implements Renderer {
       if (atlas.generation === gen) break;
       // Atlas flushed mid-build; redo everything as a full frame.
       full = true;
+      // If this was the last attempt some rects may still be stale, so ask for
+      // another full frame next time rather than leaving the screen wrong.
+      if (attempt === MAX_BUILD_ATTEMPTS - 1) this.forceFull = true;
     }
 
     return { full, dirtyRows, glyphs };
@@ -285,6 +294,7 @@ export class WebGL2Renderer implements Renderer {
     if (!this.curVisible) return;
     this.curVr = vr;
     this.curX = cur.x;
+    this.curShape = cur.shape;
 
     const key = (cur.y << 20) | (cur.x << 4) | cursorShapeBit(cur.shape);
     if (key !== this.lastCursorKey) {
@@ -310,18 +320,20 @@ export class WebGL2Renderer implements Renderer {
 
     if (full) {
       gl.bindBuffer(gl.ARRAY_BUFFER, this.bgBuf);
-      gl.bufferSubData(gl.ARRAY_BUFFER, 0, b.bg);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, b.bgBytes);
       gl.bindBuffer(gl.ARRAY_BUFFER, this.glyphBuf);
-      gl.bufferSubData(gl.ARRAY_BUFFER, 0, new Uint8Array(b.glyphBuf));
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, b.glyphBytes);
       gl.bindBuffer(gl.ARRAY_BUFFER, this.decoBuf);
-      gl.bufferSubData(gl.ARRAY_BUFFER, 0, new Uint8Array(b.decoBuf));
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, b.decoBytes);
       return;
     }
 
-    // Coalesce contiguous dirty rows into runs and upload each run once.
-    const bgBytes = new Uint8Array(b.bg.buffer);
-    const glyphBytes = new Uint8Array(b.glyphBuf);
-    const decoBytes = new Uint8Array(b.decoBuf);
+    // Coalesce contiguous dirty rows into runs and upload each run once. Byte
+    // offsets are computed inline rather than through the *Range helpers so the
+    // steady-state upload path allocates nothing at all.
+    const perRowBg = this.cols * 4;
+    const perRowGlyph = this.cols * GLYPH_UNITS * 4;
+    const perRowDeco = this.cols * DECO_PER_CELL * DECO_UNITS * 4;
     let vr = 0;
     while (vr < this.rows) {
       if (this.dirtyFlags[vr] === 0) {
@@ -330,10 +342,11 @@ export class WebGL2Renderer implements Renderer {
       }
       let end = vr;
       while (end + 1 < this.rows && this.dirtyFlags[end + 1] === 1) end++;
+      const span = end - vr + 1;
 
-      this.uploadRun(gl, this.bgBuf, bgBytes, b.bgRange(vr).offset, b.bgRange(end).offset + b.bgRange(end).length);
-      this.uploadRun(gl, this.glyphBuf, glyphBytes, b.glyphRange(vr).offset, b.glyphRange(end).offset + b.glyphRange(end).length);
-      this.uploadRun(gl, this.decoBuf, decoBytes, b.decoRange(vr).offset, b.decoRange(end).offset + b.decoRange(end).length);
+      this.uploadRun(gl, this.bgBuf, b.bgBytes, vr * perRowBg, span * perRowBg);
+      this.uploadRun(gl, this.glyphBuf, b.glyphBytes, vr * perRowGlyph, span * perRowGlyph);
+      this.uploadRun(gl, this.decoBuf, b.decoBytes, vr * perRowDeco, span * perRowDeco);
       vr = end + 1;
     }
   }
@@ -343,15 +356,15 @@ export class WebGL2Renderer implements Renderer {
     buf: WebGLBuffer | null,
     bytes: Uint8Array,
     startByte: number,
-    endByte: number,
+    lengthBytes: number,
   ): void {
     gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-    gl.bufferSubData(gl.ARRAY_BUFFER, startByte, bytes, startByte, endByte - startByte);
+    gl.bufferSubData(gl.ARRAY_BUFFER, startByte, bytes, startByte, lengthBytes);
   }
 
   // --- draws --------------------------------------------------------------
 
-  private draw(source: VtSource, viewportY: number): number {
+  private draw(): number {
     const gl = this.gl!;
     const w = this.cols * this.cellW;
     const h = this.rows * this.cellH;
@@ -367,8 +380,6 @@ export class WebGL2Renderer implements Renderer {
     gl.clear(gl.COLOR_BUFFER_BIT);
 
     const cellCount = this.buffers.cellCount;
-    const res: [number, number] = [w, h];
-    const cell: [number, number] = [this.cellW, this.cellH];
     const atlasSize = this.atlas!.pageSize;
     const time = now() / 500;
     let calls = 0;
@@ -377,8 +388,8 @@ export class WebGL2Renderer implements Renderer {
     {
       const p = this.bgProg!;
       gl.useProgram(p.prog);
-      gl.uniform2f(p.u.u_resolution, res[0], res[1]);
-      gl.uniform2f(p.u.u_cellSize, cell[0], cell[1]);
+      gl.uniform2f(p.u.u_resolution, w, h);
+      gl.uniform2f(p.u.u_cellSize, this.cellW, this.cellH);
       gl.uniform1i(p.u.u_cols, this.cols);
       gl.bindVertexArray(this.bgVao);
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, cellCount);
@@ -392,8 +403,8 @@ export class WebGL2Renderer implements Renderer {
     {
       const p = this.glyphProg!;
       gl.useProgram(p.prog);
-      gl.uniform2f(p.u.u_resolution, res[0], res[1]);
-      gl.uniform2f(p.u.u_cellSize, cell[0], cell[1]);
+      gl.uniform2f(p.u.u_resolution, w, h);
+      gl.uniform2f(p.u.u_cellSize, this.cellW, this.cellH);
       gl.uniform2f(p.u.u_atlasSize, atlasSize, atlasSize);
       gl.uniform1i(p.u.u_cols, this.cols);
       gl.uniform1f(p.u.u_time, time);
@@ -409,21 +420,21 @@ export class WebGL2Renderer implements Renderer {
     {
       const p = this.solidProg!;
       gl.useProgram(p.prog);
-      gl.uniform2f(p.u.u_resolution, res[0], res[1]);
+      gl.uniform2f(p.u.u_resolution, w, h);
       gl.bindVertexArray(this.decoVao);
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, this.buffers.decoCount);
       calls++;
     }
 
-    calls += this.drawCursor(source, viewportY);
+    calls += this.drawCursor();
     gl.bindVertexArray(null);
     return calls;
   }
 
-  private drawCursor(source: VtSource, _viewportY: number): number {
+  private drawCursor(): number {
     if (!this.curVisible) return 0;
     const gl = this.gl!;
-    const cur = source.getCursor();
+    const shape = this.curShape;
     const x = this.curX * this.cellW;
     const y = this.curVr * this.cellH;
     const thickness = Math.max(1, Math.round(this.dpr * 2));
@@ -434,9 +445,9 @@ export class WebGL2Renderer implements Renderer {
     let ry = y;
     let rw = this.cellW;
     let rh = this.cellH;
-    if (cur.shape === 'bar') {
+    if (shape === 'bar') {
       rw = thickness;
-    } else if (cur.shape === 'underline') {
+    } else if (shape === 'underline') {
       ry = y + this.cellH - thickness;
       rh = thickness;
     }
@@ -457,7 +468,7 @@ export class WebGL2Renderer implements Renderer {
     }
 
     // Block cursor: overpaint the covered glyph in the cursor-text color.
-    if (cur.shape === 'block' && this.curGlyphRect) {
+    if (shape === 'block' && this.curGlyphRect) {
       const rect = this.curGlyphRect;
       const f = this.cursorGlyphF32;
       const u = this.cursorGlyphU32;
@@ -612,7 +623,8 @@ export class WebGL2Renderer implements Renderer {
   }
 
   private sizeInstanceGpuBuffers(): void {
-    const gl = this.gl!;
+    const gl = this.gl;
+    if (!gl || !this.bgBuf) return; // resize() before mount(); sized at mount
     gl.bindBuffer(gl.ARRAY_BUFFER, this.bgBuf);
     gl.bufferData(gl.ARRAY_BUFFER, this.buffers.bg.byteLength, gl.DYNAMIC_DRAW);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.glyphBuf);
