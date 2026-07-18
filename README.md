@@ -34,11 +34,13 @@ frames upload nothing, repeated frames hit the atlas cache, and a lost GPU
 context is recovered.
 
 What is not done. There is no contextual shaper yet, so Arabic joining is still
-wrong (the hook and the string-keyed atlas are in place for it). The renderer has
-not run against real ghostty-vt wasm, only against the fake source. Selection
+wrong (the hook and the string-keyed atlas are in place for it). Selection
 overlays, ligatures, and subpixel antialiasing are unimplemented. Performance has
 only been measured under software rendering, so the timings below are a floor
 rather than a hardware result. See the gaps listed at the end of DESIGN.md.
+
+The renderer has now been driven by a real ghostty-vt wasm buffer as well as by
+the fake source: see the integration notes below.
 
 The name vtgl is a working name and is trivial to change.
 
@@ -93,6 +95,44 @@ renderer.render(source, viewportY);
 
 The source is any object implementing the VtSource interface in src/types.ts.
 For tests and experiments, FakeSource in src/testing provides a scriptable grid.
+
+### Vendoring the built bundle
+
+Consumers with no npm pipeline can vendor a single file. `npm run build:vendor`
+emits `dist/vtgl.vendor.js`, a minified dependency-free ESM module with a banner
+recording the version and git revision it was built from, which a browser can
+import directly.
+
+## Integrating with a real VT
+
+vtgl has been integrated into sip, which renders terminals in the browser over
+ghostty-vt wasm. That integration is the reference for what adapting a real VT
+involves, and it needed no changes to the renderer core. Three things came up
+that are worth knowing before writing another adapter.
+
+Coordinate translation. vtgl addresses rows absolutely across scrollback plus
+the active screen. A VT that reports screen-relative rows plus a separate
+scrollback accessor needs a mapping layer, and the viewport row vtgl is asked to
+draw is the absolute row at the top of the screen, not a scroll offset.
+
+Default colors. ghostty-vt reports rgb(0,0,0) for "use the terminal default"
+rather than for black. vtgl expects colors already resolved, so the adapter has
+to substitute the theme's foreground and background. A renderer that skips this
+draws black-on-black.
+
+Cell geometry. vtgl derives its cell box from fontSize, lineHeight and
+letterSpacing rather than accepting a measured cell size. When an existing
+renderer's geometry has to stay authoritative (so that switching renderers does
+not reflow the terminal or move mouse hit-testing), solve for lineHeight and
+letterSpacing from the measured cell instead of forcing the host onto vtgl's
+numbers. Because both depend on device pixel ratio, a DPR change means rebuilding
+the renderer rather than only resizing it.
+
+Coexisting with another renderer. A WebGL2 context and a 2D context cannot share
+a canvas, so vtgl needs its own. In sip it sits behind the incumbent 2D canvas,
+which becomes a transparent overlay still responsible for the cursor, kitty
+graphics, the scrollbar and the selection tint. vtgl draws no selection, so a
+host with selection has to draw it itself.
 
 ## Development
 

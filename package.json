@@ -19,6 +19,7 @@
   ],
   "scripts": {
     "build": "node scripts/build.mjs",
+    "build:vendor": "node scripts/build-vendor.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node --test --expose-gc --experimental-strip-types \"test/**/*.test.ts\"",
     "test:browser": "node scripts/build-harness.mjs && playwright test webgl2.spec.ts",
