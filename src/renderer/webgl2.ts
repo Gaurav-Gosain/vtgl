@@ -11,7 +11,7 @@
 
 import { CellFlags } from '../types.ts';
 import { Emitter } from '../events.ts';
-import { computeCellMetrics } from './metrics.ts';
+import { computeCellMetrics, measureFont } from './metrics.ts';
 import { InstanceBuffers, GLYPH_UNITS, DECO_UNITS, DECO_PER_CELL } from './instances.ts';
 import { styleMask } from '../atlas/key.ts';
 import { GlyphAtlas } from '../atlas/glyph-atlas.ts';
@@ -704,18 +704,16 @@ export class WebGL2Renderer implements Renderer {
 
   private measure(): void {
     this.deviceFontPx = this.opts.fontSize * this.dpr;
-    let advance = this.deviceFontPx * 0.6;
-    const ctx = this.scratchCtx;
-    if (ctx) {
-      ctx.font = `${this.deviceFontPx}px ${this.opts.fontFamily}`;
-      const m = ctx.measureText('M');
-      if (m.width > 0) advance = m.width;
-    }
+    const measurement = measureFont(
+      this.scratchCtx,
+      this.opts.fontFamily,
+      this.deviceFontPx,
+    );
     const g = computeCellMetrics(
       this.opts.fontSize,
       this.dpr,
       this.opts.lineHeight,
-      advance,
+      measurement,
       this.opts.letterSpacing,
     );
     this.cellW = g.cellW;

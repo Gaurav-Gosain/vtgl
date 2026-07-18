@@ -9,7 +9,7 @@
 import { CellFlags } from '../types.ts';
 import { Emitter } from '../events.ts';
 import { toCss } from '../color.ts';
-import { computeCellMetrics } from './metrics.ts';
+import { computeCellMetrics, measureFont } from './metrics.ts';
 import type {
   CellCoord,
   LineView,
@@ -334,19 +334,17 @@ export class Canvas2DRenderer implements Renderer {
 
   private measure(): void {
     this.deviceFontPx = this.opts.fontSize * this.dpr;
-    const ctx = this.ctx;
-    let advance = this.deviceFontPx * 0.6; // monospace fallback
-    if (ctx) {
-      ctx.font = `${this.deviceFontPx}px ${this.opts.fontFamily}`;
-      const m = ctx.measureText('M');
-      if (m.width > 0) advance = m.width;
-    }
     // Shared with the WebGL2 core so both backends land on identical geometry.
+    const measurement = measureFont(
+      this.ctx,
+      this.opts.fontFamily,
+      this.deviceFontPx,
+    );
     const g = computeCellMetrics(
       this.opts.fontSize,
       this.dpr,
       this.opts.lineHeight,
-      advance,
+      measurement,
       this.opts.letterSpacing ?? 0,
     );
     this.cellW = g.cellW;

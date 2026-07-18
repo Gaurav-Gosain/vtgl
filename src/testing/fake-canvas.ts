@@ -24,6 +24,13 @@ export class RecordingContext2D {
   readonly ops: RecordedOp[] = [];
   /** Per-code-point advance used by measureText, in the current font's px. */
   private advanceRatio = 0.6;
+  /**
+   * Vertical extents reported by measureText, as a fraction of the font px.
+   * Chosen so the natural line box is 1.2x the nominal size, which is what a
+   * typical monospace face declares.
+   */
+  private ascentRatio = 1.0;
+  private descentRatio = 0.2;
 
   fillRect(x: number, y: number, w: number, h: number): void {
     this.ops.push({ op: 'fillRect', x, y, w, h, fillStyle: this.fillStyle, font: this.font, globalAlpha: this.globalAlpha });
@@ -37,9 +44,17 @@ export class RecordingContext2D {
     this.ops.push({ op: 'fillText', x, y, text, fillStyle: this.fillStyle, font: this.font, globalAlpha: this.globalAlpha });
   }
 
-  measureText(text: string): { width: number } {
+  measureText(text: string): {
+    width: number;
+    fontBoundingBoxAscent: number;
+    fontBoundingBoxDescent: number;
+  } {
     const px = parseFloat(this.font) || 10;
-    return { width: text.length * px * this.advanceRatio };
+    return {
+      width: text.length * px * this.advanceRatio,
+      fontBoundingBoxAscent: px * this.ascentRatio,
+      fontBoundingBoxDescent: px * this.descentRatio,
+    };
   }
 
   // Methods the renderer may touch but the tests ignore.
