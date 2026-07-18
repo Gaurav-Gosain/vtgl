@@ -408,14 +408,73 @@ the Canvas2D baseline, not by absolute fps claims. The current Canvas2D benchmar
 so its numbers measure the renderer's decision loop, not real raster cost; they
 exist for regression tracking and to compare the future core's operation counts.
 
-## 10. What the Core phase builds
+## 10. Core phase: what shipped
 
-Everything in sections 5 and 6 as a WebGL2 backend implementing the Renderer
-interface: the dynamic LRU glyph atlas with a shelf allocator and multi-page
-eviction; the background and glyph instanced pipelines with the attribute and
-uniform layout above; damage-driven `bufferSubData` uploads reusing
-`isRowDirty`; DPR-aware backing store; and `createRenderer` probing for WebGL2
-with automatic fallback to the Canvas2D backend that already exists. Then the
-Playwright harness (draw-call counts, frame CPU time, atlas uploads, relative
-deltas) and, as a time-boxed follow-up, the run-based shaper behind the hook in
-section 8.
+Everything in sections 5 and 6 landed as `src/renderer/webgl2.ts` plus its
+supporting modules. Where the implementation makes a choice the sections above
+left open, this is what it chose.
+
+Module split. The GL-free parts are separated from the GL parts so the logic is
+testable under node with no GPU: `atlas/shelf.ts` (shelf allocator),
+`atlas/packer.ts` (multi-page LRU bookkeeping), and `renderer/instances.ts`
+(instance-stream generation) are pure; `atlas/glyph-atlas.ts` and
+`renderer/webgl2.ts` own the GL objects. `renderer/metrics.ts` holds the cell
+geometry both backends share, which is what makes pixel parity testable.
+
+Cell position is derived, not stored. The background and glyph passes recover
+`col` and `row` from `gl_InstanceID` and a `u_cols` uniform rather than carrying
+an `a_cell` attribute, so the background instance record is a single uint and
+the glyph record is 32 bytes. Section 5 lists `a_cell`; deriving it is
+equivalent and smaller.
+
+Decorations are per-cell, not per-decorated-cell. Section 5 describes the
+decoration pass as one instance per decorated cell, which would make its
+instance count dynamic. Because the GPU redraws the whole grid every frame while
+only dirty rows are re-uploaded, a dynamic list would have to be rebuilt in full
+each frame and would defeat the damage tracking. Instead the decoration stream is
+a fixed two instances per cell (underline, strikethrough), zero-area when absent,
+so it is damage-driven exactly like the other two streams.
+
+Multi-page sampling uses a texture array. Pages are layers of a
+`TEXTURE_2D_ARRAY`; the layer index rides in bits 8..15 of `a_style`. This keeps
+the glyph pass to one draw regardless of page count.
+
+Draw calls. Background, glyphs, decorations, then the cursor: three fixed calls
+plus one for the cursor rect and, for a block cursor over a non-blank cell, one
+more for the overpainted glyph. So three to five per frame, independent of cell
+count. The browser suite asserts the count does not move as the grid grows.
+
+Eviction is a flush, not a partial reclaim. Shelf packing cannot free individual
+slots, so when every page is full the packer drops all entries and bumps a
+generation counter. The renderer notices the generation change mid-build and
+restarts the frame as a full redraw, re-rastering the live working set into the
+fresh atlas in one pass. This keeps CPU-side rects and GPU-side pixels from ever
+disagreeing, at the cost of one expensive frame under atlas pressure. Stale
+entries are counted as evictions for observability.
+
+Allocation. The instance streams, their byte views, the dirty-row flags, and the
+cursor scratch are all preallocated and reused; the upload path is arithmetic
+over persistent views. Two things still allocate on the dirty-cell path by
+design: `LineView.grapheme(col)` may mint a string, and the atlas key is a
+string concatenation. Both are short-lived garbage rather than retained growth,
+and `test/allocation.test.ts` asserts the retained heap does not grow.
+
+## 11. Known gaps
+
+- No contextual shaper. `ShaperHook` is defined and the atlas keys by string so
+  shaped runs slot in, but nothing implements it, so Arabic joining is still
+  wrong. This is the intended next piece of work.
+- Never run against real ghostty-vt wasm. Every test drives the fake source. The
+  interface was written to mirror the wasm cell model, but that claim is
+  unverified against the real thing.
+- Performance is measured only under SwiftShader software rendering. The CPU-side
+  numbers are meaningful; the GPU-side cost on real hardware is not yet known.
+- The atlas key concatenates a string per dirty cell. An interning cache keyed by
+  codepoint for the common single-scalar case would remove most of that garbage.
+- Selection overlays are in the Theme type but not drawn.
+- Blink is implemented as a shader-side time gate and is untested, since no
+  scenario sets the blink flag.
+- Ligatures and subpixel antialiasing are not implemented. The baked fg-quant
+  atlas mode from section 4 exists as a key function but no renderer uses it.
+- A wide glyph whose raster overflows its two-cell slot is clipped by the atlas,
+  where the Canvas2D path would let it bleed into the neighboring cell.

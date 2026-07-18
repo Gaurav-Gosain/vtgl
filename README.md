@@ -13,21 +13,59 @@ the VT.
 
 ## Status
 
-Early. This repository currently contains:
+Working, not yet proven in production. This repository contains:
 
 - The full API contract as TypeScript types (see DESIGN.md and src/types.ts).
-- A working Canvas2D renderer implementing the Renderer interface.
+- A WebGL2 glyph-atlas renderer: a dynamic multi-page atlas with LRU eviction,
+  instanced background, glyph and decoration passes, and damage-driven buffer
+  uploads that reuse the source's own dirty-row tracking.
+- A Canvas2D renderer implementing the same interface, used both as the
+  no-WebGL2 fallback and as the correctness reference for the WebGL2 path.
+- createRenderer, which probes for WebGL2 and picks the backend for you.
 - A scriptable fake VtSource and a set of golden scenarios shared by tests and
   benchmarks.
-- Unit tests and an esbuild-based build.
+- Unit tests under node, browser tests under Playwright, and an esbuild build.
 
-Not yet built: the WebGL2 glyph-atlas core, which is the reason the package
-exists. The Canvas2D renderer is correct but, like every per-cell fillText
-renderer, it caps full-screen redraw rate well below 60fps on large grids. The
-WebGL2 core described in DESIGN.md is the path to xterm.js-WebGL-class speed. The
-Canvas2D path stays as the no-WebGL2 fallback.
+What is verified. The WebGL2 output is compared pixel by pixel against the
+Canvas2D reference on every golden scenario, including wide CJK cells and ZWJ
+emoji clusters, and must agree within a small tolerance. The browser suite also
+pins the structural claims: draw calls stay fixed as the grid grows, clean
+frames upload nothing, repeated frames hit the atlas cache, and a lost GPU
+context is recovered.
+
+What is not done. There is no contextual shaper yet, so Arabic joining is still
+wrong (the hook and the string-keyed atlas are in place for it). The renderer has
+not run against real ghostty-vt wasm, only against the fake source. Selection
+overlays, ligatures, and subpixel antialiasing are unimplemented. Performance has
+only been measured under software rendering, so the timings below are a floor
+rather than a hardware result. See the gaps listed at the end of DESIGN.md.
 
 The name vtgl is a working name and is trivial to change.
+
+## Performance
+
+Measured with `npm run bench:browser` on a 120x40 grid, forcing every row dirty
+each frame so every scenario is a worst-case full-screen repaint. The figures
+are the median CPU milliseconds spent inside render(), which covers rebuilding
+the instance data and issuing the uploads and draws.
+
+```
+scenario   webgl2   canvas2d
+ascii       0.7ms      3.5ms
+cjk         0.6ms      2.2ms
+emoji       0.6ms      1.3ms
+churn       0.8ms      7.4ms
+blank       0.2ms      0.1ms
+```
+
+Read these as relative signals. Headless chromium runs GL on SwiftShader, which
+rasterizes on the CPU, so the absolute GPU-side cost in that environment is not
+representative and no frame rate is claimed here. What does transfer is the
+shape of the result: the WebGL2 path spends under a millisecond of CPU on a full
+repaint that costs the per-cell fillText path several, and it issues a fixed
+handful of draw calls no matter how many cells changed. The blank screen is the
+one case where Canvas2D wins, because skipping almost every cell beats
+uploading and drawing a full grid of mostly degenerate quads.
 
 ## Design
 
@@ -62,10 +100,19 @@ For tests and experiments, FakeSource in src/testing provides a scriptable grid.
 npm install
 npm run typecheck
 npm run test
+npm run test:browser
 npm run build
 ```
 
-Node 24 or newer is required for the type-stripping test runner.
+`npm run check` runs all of the above in order.
+
+Node 24 or newer is required for the type-stripping test runner. The browser
+tests drive the system chromium at /usr/bin/chromium and download no browser
+binaries; point VTGL_CHROMIUM at another executable to override it. They load
+the harness from disk over a file URL, so no static server is involved.
+
+`npm run bench` reports Canvas2D draw-decision counts under node.
+`npm run bench:browser` reports per-frame cost for both backends in the browser.
 
 ## Licensing
 
