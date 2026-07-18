@@ -27,6 +27,9 @@ export default defineConfig({
         '--enable-unsafe-swiftshader',
         '--disable-lcd-text',
         '--force-device-scale-factor=1',
+        // Ungated performance.memory, so the benchmark can report per-frame
+        // heap growth instead of Chromium's coarse bucketed value.
+        '--enable-precise-memory-info',
       ],
     },
   },

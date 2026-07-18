@@ -7,7 +7,8 @@ import { WebGL2Renderer } from '../src/renderer/webgl2.ts';
 import { Canvas2DRenderer } from '../src/renderer/canvas2d.ts';
 import { createRenderer, supportsWebGL2 } from '../src/index.ts';
 import { FakeSource } from '../src/testing/fake-source.ts';
-import { scenarios, scenarioByName } from '../src/testing/scenarios.ts';
+import { allScenarios, scenarioByName } from '../src/testing/scenarios.ts';
+import { buildTortureSource, tortureCorpus } from '../src/testing/torture.ts';
 import { CellFlags } from '../src/types.ts';
 import type { Renderer, RendererOptions, RenderStats, Theme } from '../src/types.ts';
 
@@ -45,7 +46,62 @@ interface Harness {
   }>;
   atlasProbe(): { first: number; second: number; afterNewGlyph: number };
   drawCallScaling(): Array<{ cells: number; drawCalls: number }>;
-  bench(name: string, backend: 'webgl2' | 'canvas2d', frames: number): BenchResult;
+  /**
+   * Renderer-only allocation pressure. Renders the same unchanging content with
+   * every row forced dirty, so nothing but render() runs inside the measured
+   * window: no step(), no source mutation, no string building by the driver.
+   * Allocation is measured by the caller via the CDP heap profiler, not here;
+   * this method only shapes the window.
+   */
+  allocProbe(
+    name: string,
+    backend: 'webgl2' | 'canvas2d',
+    frames: number,
+  ): AllocResult;
+  /** Pixel diff of the torture corpus between the two backends. */
+  compareTorture(threshold: number): DiffResult;
+  /** Per-entry pixel diff, so divergence can be attributed to a cluster. */
+  compareTortureRows(threshold: number): TortureRowDiff[];
+  /** Per-entry ink coverage, so an unrendered or clipped cluster is visible. */
+  tortureInk(backend: 'webgl2' | 'canvas2d'): TortureInk[];
+  bench(
+    name: string,
+    backend: 'webgl2' | 'canvas2d',
+    frames: number,
+    mode?: BenchMode,
+  ): BenchResult;
+}
+
+/**
+ * "full" forces every visible row dirty each frame: the worst-case full-screen
+ * repaint, comparable across scenarios but not what any real workload does.
+ * "natural" lets the scenario's own step() and viewportY() decide what is
+ * damaged, which is what the performance study measured.
+ */
+export type BenchMode = 'full' | 'natural';
+
+export interface TortureRowDiff {
+  name: string;
+  /** Fraction of this row's pixels that differ between the backends, 0..1. */
+  fraction: number;
+  maxChannelDelta: number;
+}
+
+export interface TortureInk {
+  name: string;
+  columns: number;
+  /** Non-background pixels inside the cluster's own cells. */
+  ink: number;
+  /** Non-background pixels in the cell immediately past the cluster. */
+  bleed: number;
+}
+
+export interface AllocResult {
+  scenario: string;
+  backend: string;
+  frames: number;
+  /** Glyphs drawn per frame, so bytes/glyph can be reasoned about. */
+  glyphs: number;
 }
 
 interface BenchResult {
@@ -56,6 +112,13 @@ interface BenchResult {
   /** Renderer-internal CPU time in render(), median and p95, ms. */
   cpuP50: number;
   cpuP95: number;
+  /**
+   * Mean CPU ms over the measured window. performance.now() is clamped to 100us
+   * in Chromium, so a single sub-millisecond sample carries only one or two
+   * significant digits; averaging the window recovers the resolution that the
+   * clamp destroys, and is the figure to compare when p50 reads 0.0.
+   */
+  cpuMean: number;
   /** Wall time around render() including the driver call overhead, ms. */
   wallP50: number;
   /** Wall time including a forced pipeline sync (readback), ms. */
@@ -63,6 +126,20 @@ interface BenchResult {
   drawCalls: number;
   glyphs: number;
   atlasUploads: number;
+  mode: BenchMode;
+  /** Rows the source reported dirty on the median frame. */
+  dirtyRowsP50: number;
+  /** Total glyph rasters uploaded to the atlas across the measured frames. */
+  totalUploads: number;
+  /**
+   * JS heap growth per frame in bytes across the measured window, or null when
+   * the browser did not expose performance.memory. This covers the whole loop,
+   * including the scenario's own step() writing into the FakeSource, so it is
+   * NOT a renderer allocation figure: use allocProbe for that. Only meaningful
+   * with --enable-precise-memory-info; a GC inside the window shows up as a
+   * negative number, which we clamp to 0.
+   */
+  heapBytesPerFrame: number | null;
 }
 
 interface DiffResult {
@@ -124,10 +201,90 @@ function renderOn(
   renderer.on('render', (s) => stats.push(s));
   for (let f = 0; f < frames; f++) {
     sc.step?.(source, f);
-    renderer.render(source, source.scrollbackRows);
+    renderer.render(source, sc.viewportY?.(source, f) ?? source.scrollbackRows);
     if (f + 1 < frames) source.clearDirty();
   }
   return { canvas, stats, renderer };
+}
+
+/**
+ * Used JS heap in bytes when the browser exposes it. Chromium only reports a
+ * useful granularity under --enable-precise-memory-info; without that flag the
+ * value is bucketed and the deltas are noise, so callers must treat a null or
+ * a zero as "not measured" rather than "no allocation".
+ */
+/** Count non-background pixels in a cell range of one row. */
+function inkIn(
+  px: ImageData,
+  metrics: { cellWidth: number; cellHeight: number },
+  row: number,
+  col: number,
+  cols: number,
+): number {
+  const x0 = Math.round(col * metrics.cellWidth);
+  const x1 = Math.min(px.width, Math.round((col + cols) * metrics.cellWidth));
+  const y0 = Math.round(row * metrics.cellHeight);
+  const y1 = Math.min(px.height, Math.round((row + 1) * metrics.cellHeight));
+  const d = px.data;
+  let n = 0;
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) {
+      const i = (y * px.width + x) * 4;
+      // Background is 0x101010; anything meaningfully brighter is a glyph.
+      if (d[i] > 0x30 || d[i + 1] > 0x30 || d[i + 2] > 0x30) n++;
+    }
+  }
+  return n;
+}
+
+function diff(a: ImageData, b: ImageData, threshold: number): DiffResult {
+  const x = a.data;
+  const y = b.data;
+  let differing = 0;
+  let maxChannelDelta = 0;
+  const total = a.width * a.height;
+  for (let i = 0; i < x.length; i += 4) {
+    const d = Math.max(
+      Math.abs(x[i] - y[i]),
+      Math.abs(x[i + 1] - y[i + 1]),
+      Math.abs(x[i + 2] - y[i + 2]),
+    );
+    if (d > maxChannelDelta) maxChannelDelta = d;
+    if (d > threshold) differing++;
+  }
+  return {
+    differing,
+    total,
+    fraction: differing / total,
+    maxChannelDelta,
+    width: a.width,
+    height: a.height,
+  };
+}
+
+/** Render the whole torture corpus, one entry per row, on a fresh canvas. */
+function renderTorture(backend: 'webgl2' | 'canvas2d'): {
+  canvas: HTMLCanvasElement;
+  renderer: Renderer;
+  metrics: { cellWidth: number; cellHeight: number };
+} {
+  const source = buildTortureSource();
+  const renderer = build(backend);
+  const canvas = makeCanvas(8, 8);
+  renderer.mount(canvas);
+  renderer.resize(source.cols, source.rows, 1);
+  renderer.render(source, 0);
+  const m = renderer.getMetrics();
+  return {
+    canvas,
+    renderer,
+    metrics: { cellWidth: m.cellWidth, cellHeight: m.cellHeight },
+  };
+}
+
+function readHeap(): number | null {
+  const mem = (performance as unknown as { memory?: { usedJSHeapSize: number } }).memory;
+  return mem ? mem.usedJSHeapSize : null;
 }
 
 function percentile(xs: number[], p: number): number {
@@ -163,7 +320,7 @@ function readPixels(canvas: HTMLCanvasElement): ImageData {
 
 const harness: Harness = {
   scenarioNames() {
-    return scenarios.map((s) => s.name);
+    return allScenarios.map((s) => s.name);
   },
 
   renderScenario(name, backend) {
@@ -356,7 +513,107 @@ const harness: Harness = {
     return { first, second, afterNewGlyph };
   },
 
-  bench(name, backend, frames) {
+  allocProbe(name, backend, frames) {
+    const sc = scenarioByName(name);
+    if (!sc) throw new Error('unknown scenario: ' + name);
+    const source = sc.build();
+    const renderer = build(backend);
+    const canvas = makeCanvas(8, 8);
+    renderer.mount(canvas);
+    renderer.resize(sc.cols, sc.rows, 1);
+    let last: RenderStats | undefined;
+    renderer.on('render', (s) => (last = s));
+
+    const top = sc.viewportY?.(source, 0) ?? source.scrollbackRows;
+    const markAllDirty = (): void => {
+      for (let r = 0; r < sc.rows; r++) source.markDirty(top + r);
+    };
+
+    // Warm the atlas and the JIT first: a first-paint raster allocates by
+    // design, and counting it would drown the steady-state figure.
+    for (let f = 0; f < 20; f++) {
+      markAllDirty();
+      renderer.render(source, top);
+      source.clearDirty();
+    }
+
+    // The caller brackets this loop with the CDP heap profiler, so the window
+    // must contain render() and nothing else.
+    for (let f = 0; f < frames; f++) {
+      markAllDirty();
+      renderer.render(source, top);
+      source.clearDirty();
+    }
+    renderer.dispose();
+
+    return { scenario: name, backend, frames, glyphs: last!.glyphs };
+  },
+
+  compareTorture(threshold) {
+    const gl = renderTorture('webgl2');
+    const glPixels = readPixels(gl.canvas);
+    const c2 = renderTorture('canvas2d');
+    const c2Pixels = readPixels(c2.canvas);
+    gl.renderer.dispose();
+    c2.renderer.dispose();
+    return diff(glPixels, c2Pixels, threshold);
+  },
+
+  compareTortureRows(threshold) {
+    const gl = renderTorture('webgl2');
+    const glPixels = readPixels(gl.canvas);
+    const c2 = renderTorture('canvas2d');
+    const c2Pixels = readPixels(c2.canvas);
+    const h = gl.metrics.cellHeight;
+    const out: TortureRowDiff[] = tortureCorpus.map((entry, row) => {
+      const y0 = Math.round(row * h);
+      const y1 = Math.min(glPixels.height, Math.round((row + 1) * h));
+      let differing = 0;
+      let maxChannelDelta = 0;
+      let total = 0;
+      for (let y = y0; y < y1; y++) {
+        for (let x = 0; x < glPixels.width; x++) {
+          const i = (y * glPixels.width + x) * 4;
+          const d = Math.max(
+            Math.abs(glPixels.data[i] - c2Pixels.data[i]),
+            Math.abs(glPixels.data[i + 1] - c2Pixels.data[i + 1]),
+            Math.abs(glPixels.data[i + 2] - c2Pixels.data[i + 2]),
+          );
+          if (d > maxChannelDelta) maxChannelDelta = d;
+          if (d > threshold) differing++;
+          total++;
+        }
+      }
+      return {
+        name: entry.name,
+        fraction: total === 0 ? 0 : differing / total,
+        maxChannelDelta,
+      };
+    });
+    gl.renderer.dispose();
+    c2.renderer.dispose();
+    return out;
+  },
+
+  tortureInk(backend) {
+    const { canvas, renderer, metrics } = renderTorture(backend);
+    const px = readPixels(canvas);
+    const out: TortureInk[] = [];
+    tortureCorpus.forEach((entry, row) => {
+      out.push({
+        name: entry.name,
+        columns: entry.columns,
+        ink: inkIn(px, metrics, row, 0, entry.columns),
+        // The blank column the builder leaves after each cluster: ink here
+        // means a wide glyph bled out of its own cells.
+        bleed: inkIn(px, metrics, row, entry.columns, 1),
+      });
+    });
+    renderer.dispose();
+    return out;
+  },
+
+  bench(name, backend, frames, mode = 'full') {
     const sc = scenarioByName(name);
     if (!sc) throw new Error('unknown scenario: ' + name);
     const source = sc.build();
@@ -372,27 +629,38 @@ const harness: Harness = {
     // sync timing includes GPU work instead of just the driver call.
     const sync = makeSyncProbe(canvas, backend);
 
-    const top = source.scrollbackRows;
-    const markAllDirty = (): void => {
+    const activeTop = source.scrollbackRows;
+    const viewportFor = (f: number): number =>
+      sc.viewportY?.(source, f) ?? activeTop;
+    const markAllDirty = (f: number): void => {
+      // In full mode the damage is relative to whatever the viewport shows, so
+      // a scrolling scenario still gets the rows it is about to draw dirtied.
+      const top = viewportFor(f);
       for (let r = 0; r < sc.rows; r++) source.markDirty(top + r);
     };
 
+    // Warm up: raster the glyph set into the atlas and let the JIT settle, so
+    // the measured window is steady state rather than first-paint cost.
     for (let f = 0; f < 10; f++) {
       sc.step?.(source, f);
-      markAllDirty();
-      renderer.render(source, top);
+      if (mode === 'full') markAllDirty(f);
+      renderer.render(source, viewportFor(f));
       source.clearDirty();
     }
 
     const cpu: number[] = [];
     const wall: number[] = [];
     const syncMs: number[] = [];
+    const dirty: number[] = [];
+    let totalUploads = 0;
+
+    const heapBefore = readHeap();
     for (let f = 0; f < frames; f++) {
-      sc.step?.(source, 10 + f);
-      // Worst case: every visible row dirty, i.e. a full-screen repaint.
-      markAllDirty();
+      const frame = 10 + f;
+      sc.step?.(source, frame);
+      if (mode === 'full') markAllDirty(frame);
       const t0 = performance.now();
-      renderer.render(source, top);
+      renderer.render(source, viewportFor(frame));
       const t1 = performance.now();
       sync();
       const t2 = performance.now();
@@ -400,7 +668,15 @@ const harness: Harness = {
       cpu.push(last!.cpuMs);
       wall.push(t1 - t0);
       syncMs.push(t2 - t0);
+      dirty.push(last!.dirtyRows);
+      totalUploads += last!.atlasUploads;
     }
+    const heapAfter = readHeap();
+
+    const heapBytesPerFrame =
+      heapBefore === null || heapAfter === null
+        ? null
+        : Math.max(0, Math.round((heapAfter - heapBefore) / frames));
 
     const result: BenchResult = {
       scenario: name,
@@ -409,11 +685,16 @@ const harness: Harness = {
       rows: sc.rows,
       cpuP50: percentile(cpu, 50),
       cpuP95: percentile(cpu, 95),
+      cpuMean: Math.round((cpu.reduce((a, b) => a + b, 0) / cpu.length) * 1000) / 1000,
       wallP50: percentile(wall, 50),
       syncP50: percentile(syncMs, 50),
       drawCalls: last!.drawCalls,
       glyphs: last!.glyphs,
       atlasUploads: last!.atlasUploads,
+      mode,
+      dirtyRowsP50: percentile(dirty, 50),
+      totalUploads,
+      heapBytesPerFrame,
     };
     renderer.dispose();
     return result;
