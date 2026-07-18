@@ -10,6 +10,7 @@ import { CellFlags } from '../types.ts';
 import { Emitter } from '../events.ts';
 import { toCss } from '../color.ts';
 import { computeCellMetrics, measureFont } from './metrics.ts';
+import { RenderScheduler } from './scheduler.ts';
 import type {
   CellCoord,
   LineView,
@@ -51,6 +52,9 @@ export class Canvas2DRenderer implements Renderer {
   private cellH = 0;
   private baseline = 0;
   private deviceFontPx = 0;
+
+  private scheduler: RenderScheduler | null = null;
+  private pendingFrame: { source: VtSource; viewportY: number } | null = null;
 
   private forceFull = true;
   private lastCursorKey = -1;
@@ -104,11 +108,38 @@ export class Canvas2DRenderer implements Renderer {
   }
 
   dispose(): void {
+    this.scheduler?.dispose();
+    this.scheduler = null;
+    this.pendingFrame = null;
     this.emitter.clear();
     this.fontCache.clear();
     this.fillCache.clear();
     this.ctx = null;
     this.canvas = null;
+  }
+
+  // --- scheduling ---------------------------------------------------------
+
+  /**
+   * Ask for a render on the next animation frame, coalescing repeat requests
+   * within one frame into a single render. Prefer this over render() on any
+   * path driven by inbound data or input; render() stays available for
+   * callers that already own a frame loop.
+   */
+  requestRender(source: VtSource, viewportY: number): void {
+    this.pendingFrame = { source, viewportY };
+    this.scheduler ??= new RenderScheduler(() => {
+      const f = this.pendingFrame;
+      if (!f || !this.ctx) return;
+      this.pendingFrame = null;
+      this.render(f.source, f.viewportY);
+    });
+    this.scheduler.schedule();
+  }
+
+  /** Render any frame booked by requestRender right now. */
+  flushRender(): void {
+    this.scheduler?.flush();
   }
 
   // --- render -------------------------------------------------------------

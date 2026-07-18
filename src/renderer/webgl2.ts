@@ -12,6 +12,7 @@
 import { CellFlags } from '../types.ts';
 import { Emitter } from '../events.ts';
 import { computeCellMetrics, measureFont } from './metrics.ts';
+import { RenderScheduler } from './scheduler.ts';
 import { InstanceBuffers, GLYPH_UNITS, DECO_UNITS, DECO_PER_CELL } from './instances.ts';
 import { styleMask } from '../atlas/key.ts';
 import { GlyphAtlas } from '../atlas/glyph-atlas.ts';
@@ -79,6 +80,9 @@ export class WebGL2Renderer implements Renderer {
   private cellH = 0;
   private baseline = 0;
   private deviceFontPx = 0;
+
+  private scheduler: RenderScheduler | null = null;
+  private pendingFrame: { source: VtSource; viewportY: number } | null = null;
 
   private forceFull = true;
   private lastCursorKey = -1;
@@ -196,6 +200,9 @@ export class WebGL2Renderer implements Renderer {
   }
 
   dispose(): void {
+    this.scheduler?.dispose();
+    this.scheduler = null;
+    this.pendingFrame = null;
     const el = this.canvas as HTMLCanvasElement | null;
     if (el && typeof el.removeEventListener === 'function') {
       el.removeEventListener('webglcontextlost', this.onLost as EventListener, false);
@@ -208,6 +215,30 @@ export class WebGL2Renderer implements Renderer {
     this.canvas = null;
     this.scratch = null;
     this.scratchCtx = null;
+  }
+
+  // --- scheduling ---------------------------------------------------------
+
+  /**
+   * Ask for a render on the next animation frame, coalescing repeat requests
+   * within one frame into a single render. Prefer this over render() on any
+   * path driven by inbound data or input; render() stays available for
+   * callers that already own a frame loop.
+   */
+  requestRender(source: VtSource, viewportY: number): void {
+    this.pendingFrame = { source, viewportY };
+    this.scheduler ??= new RenderScheduler(() => {
+      const f = this.pendingFrame;
+      if (!f || !this.gl) return;
+      this.pendingFrame = null;
+      this.render(f.source, f.viewportY);
+    });
+    this.scheduler.schedule();
+  }
+
+  /** Render any frame booked by requestRender right now. */
+  flushRender(): void {
+    this.scheduler?.flush();
   }
 
   // --- render -------------------------------------------------------------

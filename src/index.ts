@@ -9,6 +9,8 @@ export { WebGL2Renderer } from './renderer/webgl2.ts';
 export { atlasKey, atlasKeyBaked, styleMask, GLYPH_STYLE_MASK } from './atlas/key.ts';
 export { rgb, toCss, quantize } from './color.ts';
 export { Emitter } from './events.ts';
+export { RenderScheduler } from './renderer/scheduler.ts';
+export type { RenderSchedulerOptions } from './renderer/scheduler.ts';
 export { computeCellMetrics, measureFont } from './renderer/metrics.ts';
 export type { CellMetrics, FontMeasurement, MeasureContext } from './renderer/metrics.ts';
 export { ShelfAllocator } from './atlas/shelf.ts';
