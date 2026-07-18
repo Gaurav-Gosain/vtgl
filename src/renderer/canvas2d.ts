@@ -54,6 +54,10 @@ export class Canvas2DRenderer implements Renderer {
 
   private forceFull = true;
   private lastCursorKey = -1;
+  // Viewport row drawn at the top of the last frame. Scrolling changes which
+  // absolute rows map to which screen rows without dirtying any of them, so a
+  // change here has to force a full repaint or the screen keeps stale content.
+  private lastViewportY = -1;
 
   private readonly fontCache = new Map<number, string>();
   private readonly fillCache = new Map<number, string>();
@@ -119,7 +123,8 @@ export class Canvas2DRenderer implements Renderer {
     }
 
     const t0 = now();
-    const full = this.forceFull;
+    const full = this.forceFull || viewportY !== this.lastViewportY;
+    this.lastViewportY = viewportY;
     let dirtyRows = 0;
     let glyphs = 0;
 

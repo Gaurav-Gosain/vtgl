@@ -155,3 +155,41 @@ test('scrolled viewport draws scrollback rows at the top', () => {
   renderer.render(source, 0); // viewportY=0 -> shows rows 0 and 1
   assert.ok(canvas.context.texts().includes('S'), 'scrollback row rendered when scrolled to top');
 });
+
+test('scrolling the viewport repaints even when no row is dirty', () => {
+  // Changing viewportY remaps absolute rows onto screen rows without dirtying
+  // any of them. Without a full repaint the screen would keep stale content.
+  const { canvas, renderer, source } = setup(6, 2, 4); // 4 scrollback + 2 active
+  source.writeText(0, 0, 'AAA');
+  source.writeText(1, 0, 'BBB');
+  source.writeText(2, 0, 'CCC');
+  source.writeText(3, 0, 'DDD');
+
+  renderer.render(source, 0);
+  assert.deepEqual(canvas.context.texts(), ['A', 'A', 'A', 'B', 'B', 'B']);
+
+  source.clearDirty();
+  canvas.context.reset();
+  let stats: RenderStats | undefined;
+  renderer.on('render', (s) => (stats = s));
+  renderer.render(source, 2); // scroll down two rows
+
+  assert.equal(stats!.full, true, 'a viewport change forces a full frame');
+  assert.deepEqual(
+    canvas.context.texts(),
+    ['C', 'C', 'C', 'D', 'D', 'D'],
+    'the newly visible rows are drawn',
+  );
+});
+
+test('re-rendering the same viewport does not force a full frame', () => {
+  const { renderer, source } = setup(6, 2, 4);
+  source.writeText(4, 0, 'ab');
+  renderer.render(source, 4);
+  source.clearDirty();
+  let stats: RenderStats | undefined;
+  renderer.on('render', (s) => (stats = s));
+  renderer.render(source, 4);
+  assert.equal(stats!.full, false, 'a stationary viewport stays incremental');
+  assert.equal(stats!.dirtyRows, 0);
+});

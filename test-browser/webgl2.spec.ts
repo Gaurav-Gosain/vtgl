@@ -108,6 +108,14 @@ test('uploads are damage driven: clean frames re-upload nothing', async ({ page 
   expect(new Set(stats.map((s) => s.drawCalls)).size).toBe(1);
 });
 
+test('scrolling repaints even though no row is dirty', async ({ page }) => {
+  const r = await page.evaluate(() => (window as any).harness.scrollProbe());
+  expect(r.scrollForcedFull, 'a viewport change forces a full rebuild').toBe(true);
+  expect(r.pixelsChanged, 'the framebuffer actually shows the new rows').toBe(true);
+  expect(r.stationaryFull, 'a stationary viewport goes back to incremental').toBe(false);
+  expect(r.stationaryDirtyRows).toBe(0);
+});
+
 test('the atlas caches glyphs: repeat frames upload nothing new', async ({ page }) => {
   const a = await page.evaluate(() => (window as any).harness.atlasProbe());
   expect(a.first, 'first frame rasters the three distinct glyphs').toBe(3);

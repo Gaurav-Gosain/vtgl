@@ -28,6 +28,12 @@ interface Harness {
   statsFor(name: string, backend: 'webgl2' | 'canvas2d', frames: number): RenderStats[];
   probe(): { supportsWebGL2: boolean; autoBackend: string };
   damageProbe(): RenderStats[];
+  scrollProbe(): {
+    pixelsChanged: boolean;
+    scrollForcedFull: boolean;
+    stationaryFull: boolean;
+    stationaryDirtyRows: number;
+  };
   contextLossProbe(): Promise<{
     before: string;
     sawLost: boolean;
@@ -284,6 +290,44 @@ const harness: Harness = {
       framesAfterRestore: stats.length - framesBeforeLoss,
       afterFull: after.full,
       afterUploads: after.atlasUploads,
+    };
+  },
+
+  scrollProbe() {
+    // 6 scrollback rows above a 3-row screen, each row uniquely colored so a
+    // stale viewport is visible in the pixels rather than only in the stats.
+    const source = new FakeSource({ cols: 8, rows: 3, scrollbackRows: 6 });
+    source.setCursor({ visible: false });
+    for (let r = 0; r < 9; r++) {
+      source.writeText(r, 0, 'row' + r, { bg: 0x010000 * (r + 1) });
+    }
+    const renderer = build('webgl2');
+    const canvas = makeCanvas(8, 8);
+    renderer.mount(canvas);
+    renderer.resize(8, 3, 1);
+    const stats: RenderStats[] = [];
+    renderer.on('render', (s) => stats.push(s));
+
+    renderer.render(source, 0);
+    const top = readPixels(canvas).data.slice(0, 4);
+    source.clearDirty();
+
+    // Scroll without dirtying anything: the renderer must still repaint.
+    renderer.render(source, 3);
+    const scrolled = readPixels(canvas).data.slice(0, 4);
+    const scrolledStats = stats[stats.length - 1];
+
+    // Rendering the same viewport again must fall back to incremental.
+    source.clearDirty();
+    renderer.render(source, 3);
+    const restated = stats[stats.length - 1];
+    renderer.dispose();
+
+    return {
+      pixelsChanged: top[0] !== scrolled[0] || top[1] !== scrolled[1] || top[2] !== scrolled[2],
+      scrollForcedFull: scrolledStats.full,
+      stationaryFull: restated.full,
+      stationaryDirtyRows: restated.dirtyRows,
     };
   },
 

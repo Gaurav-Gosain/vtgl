@@ -471,6 +471,11 @@ and `test/allocation.test.ts` asserts the retained heap does not grow.
   numbers are meaningful; the GPU-side cost on real hardware is not yet known.
 - The atlas key concatenates a string per dirty cell. An interning cache keyed by
   codepoint for the common single-scalar case would remove most of that garbage.
+- Scrolling repaints in full. A change in `viewportY` remaps absolute rows onto
+  screen rows without dirtying any of them, so both backends force a full frame
+  when it moves. That is correct but pessimistic: shifting the existing instance
+  data by the scroll delta and rebuilding only the newly exposed rows would make
+  a one-line scroll as cheap as a one-line edit.
 - Selection overlays are in the Theme type but not drawn.
 - Blink is implemented as a shader-side time gate and is untested, since no
   scenario sets the blink flag.

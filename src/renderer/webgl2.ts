@@ -82,6 +82,10 @@ export class WebGL2Renderer implements Renderer {
 
   private forceFull = true;
   private lastCursorKey = -1;
+  // Viewport row drawn at the top of the last frame. Scrolling changes which
+  // absolute rows map to which screen rows without dirtying any of them, so a
+  // change here has to force a full rebuild or the screen keeps stale content.
+  private lastViewportY = -1;
 
   // Scratch raster surface for the atlas.
   private scratch: AnyCanvas | null = null;
@@ -223,7 +227,8 @@ export class WebGL2Renderer implements Renderer {
 
     // Clear the flag before building: buildFrame may legitimately re-arm it to
     // request another full frame (for example after an atlas flush).
-    const wasFull = this.forceFull;
+    const wasFull = this.forceFull || viewportY !== this.lastViewportY;
+    this.lastViewportY = viewportY;
     this.forceFull = false;
 
     const { full, dirtyRows, glyphs } = this.buildFrame(source, viewportY, wasFull);
