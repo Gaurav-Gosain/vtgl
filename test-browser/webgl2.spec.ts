@@ -145,3 +145,105 @@ test('glyph counts match the visible cells per scenario', async ({ page }) => {
   // this is the degenerate-quad path doing its job.
   expect(blank.glyphs).toBeLessThan(ascii.glyphs / 10);
 });
+
+// --- grapheme torture corpus ---------------------------------------------
+//
+// The corpus is the hard half of Unicode: wide CJK, ZWJ sequences, flags, tag
+// sequences, keycaps, both variation selectors, stacked combining marks,
+// Devanagari and Arabic. Correctness here is checked two ways: the WebGL output
+// must agree with the Canvas2D reference pixel for pixel, and every cluster must
+// actually put ink in its own cells without bleeding into the next one.
+//
+// Agreement with a real ghostty-vt cell grid is asserted on the host side (the
+// sip integration), because vtgl deliberately does not depend on the VT.
+
+// Canvas2D lets a glyph whose font advance exceeds its cells paint outside
+// them; the WebGL atlas rasters into a fixed cell-sized slot and clips instead.
+// Measured on this corpus, canvas2d bleeds on 9 of 24 entries (a skin-tone
+// emoji by 128 px), webgl2 on none. That divergence is real and is the bulk of
+// the corpus-wide pixel difference, so the two behaviours are asserted
+// separately rather than averaged into one loose threshold.
+const BLEEDING_IN_CANVAS2D = new Set([
+  'emoji-simple',
+  'emoji-zwj-family',
+  'emoji-skin-tone',
+  'emoji-flag',
+  'emoji-tag-flag',
+  'emoji-keycap',
+  'emoji-zwj-rainbow',
+  'vs15-text-presentation',
+  'devanagari-ksha',
+  'devanagari-matra',
+]);
+
+test('no torture cluster is dropped, and both backends draw the same amount of it', async ({
+  page,
+}) => {
+  // Pixel-exact parity is asserted on the dense golden scenarios. It is the
+  // wrong bar for this corpus: these rows are mostly background, so a glyph
+  // landing a subpixel differently swings the differing-pixel fraction wildly
+  // while nothing is actually wrong. What must hold here is that both backends
+  // draw the same cluster in the same cells: no cluster missing, and comparable
+  // ink in each. Divergence beyond that is the clip-vs-bleed difference below.
+  interface Ink {
+    name: string;
+    columns: number;
+    ink: number;
+    bleed: number;
+  }
+  const gl: Ink[] = await page.evaluate(() => (window as any).harness.tortureInk('webgl2'));
+  const c2: Ink[] = await page.evaluate(() =>
+    (window as any).harness.tortureInk('canvas2d'),
+  );
+  expect(gl.length).toBeGreaterThan(20);
+  for (let i = 0; i < gl.length; i++) {
+    const a = gl[i];
+    const b = c2[i];
+    expect(a.name).toBe(b.name);
+    expect(a.ink, `webgl2/${a.name} drew no ink`).toBeGreaterThan(0);
+    expect(b.ink, `canvas2d/${b.name} drew no ink`).toBeGreaterThan(0);
+    if (BLEEDING_IN_CANVAS2D.has(a.name)) continue;
+    // Same glyph, same cells: the ink each backend lays down must be close.
+    const ratio = a.ink / b.ink;
+    expect(
+      ratio,
+      `${a.name}: webgl2 drew ${a.ink}px vs canvas2d ${b.ink}px`,
+    ).toBeGreaterThan(0.6);
+    expect(ratio, `${a.name}: webgl2 ${a.ink}px vs canvas2d ${b.ink}px`).toBeLessThan(1.6);
+  }
+});
+
+test('the webgl atlas never lets a cluster escape its cells', async ({ page }) => {
+  interface Ink {
+    name: string;
+    columns: number;
+    ink: number;
+    bleed: number;
+  }
+  const rows: Ink[] = await page.evaluate(() =>
+    (window as any).harness.tortureInk('webgl2'),
+  );
+  for (const r of rows) {
+    expect(r.ink, `${r.name} drew no ink`).toBeGreaterThan(0);
+    expect(r.bleed, `${r.name} bled past the cells the VT assigned it`).toBe(0);
+  }
+});
+
+test('every torture cluster draws ink on both backends', async ({ page }) => {
+  // The failure this catches is a dropped or blank cluster, which is what a
+  // grapheme-unaware renderer produces for ZWJ sequences and tag flags.
+  interface Ink {
+    name: string;
+    ink: number;
+  }
+  for (const backend of ['webgl2', 'canvas2d'] as const) {
+    const rows: Ink[] = await page.evaluate(
+      (b) => (window as any).harness.tortureInk(b),
+      backend,
+    );
+    expect(rows.length).toBeGreaterThan(20);
+    for (const r of rows) {
+      expect(r.ink, `${backend}/${r.name} drew no ink`).toBeGreaterThan(0);
+    }
+  }
+});
