@@ -17,5 +17,5 @@
     "forceConsistentCasingInFileNames": true,
     "noEmit": true
   },
-  "include": ["src", "test", "bench", "scripts"]
+  "include": ["src", "test", "bench", "scripts", "test-browser", "playwright.config.ts"]
 }
