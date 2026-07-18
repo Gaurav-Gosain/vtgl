@@ -9,6 +9,7 @@
 import { CellFlags } from '../types.ts';
 import { Emitter } from '../events.ts';
 import { toCss } from '../color.ts';
+import { computeCellMetrics } from './metrics.ts';
 import type {
   CellCoord,
   LineView,
@@ -335,11 +336,17 @@ export class Canvas2DRenderer implements Renderer {
       const m = ctx.measureText('M');
       if (m.width > 0) advance = m.width;
     }
-    const letter = (this.opts.letterSpacing ?? 0) * this.dpr;
-    this.cellW = Math.max(1, Math.round(advance + letter));
-    this.cellH = Math.max(1, Math.round(this.deviceFontPx * this.opts.lineHeight));
-    // Baseline: center the text box, sit the baseline near 80% of the cell.
-    this.baseline = Math.round(this.deviceFontPx + (this.cellH - this.deviceFontPx) / 2 - this.deviceFontPx * 0.18);
+    // Shared with the WebGL2 core so both backends land on identical geometry.
+    const g = computeCellMetrics(
+      this.opts.fontSize,
+      this.dpr,
+      this.opts.lineHeight,
+      advance,
+      this.opts.letterSpacing ?? 0,
+    );
+    this.cellW = g.cellW;
+    this.cellH = g.cellH;
+    this.baseline = g.baseline;
     this.fontCache.clear();
   }
 
