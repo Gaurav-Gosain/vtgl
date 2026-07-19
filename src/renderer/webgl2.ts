@@ -1,7 +1,7 @@
 // WebGL2 glyph-atlas renderer. Implements the same Renderer interface as the
 // Canvas2D fallback (renderer/canvas2d.ts is the pixel-decision reference), but
 // draws the whole grid in a handful of instanced draw calls instead of one
-// fillText per cell. See DESIGN.md sections 5 and 6.
+// fillText per cell. See docs/architecture.md.
 //
 // Per frame: recompute the CPU instance shadow for dirty rows only, upload the
 // changed byte ranges with bufferSubData, then issue the full-grid draws

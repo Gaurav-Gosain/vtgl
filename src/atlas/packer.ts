@@ -3,7 +3,7 @@
 // eviction policy, but knows nothing about rasterization or textures. The
 // GL-backed GlyphAtlas drives it and does the actual raster+upload on a miss.
 //
-// Keying is by string (see atlas/key.ts and DESIGN.md section 4): the same map
+// Keying is by string (see atlas/key.ts and docs/architecture.md): the same map
 // serves the per-grapheme path and a future contextual shaper's per-glyph keys.
 
 import { ShelfAllocator } from './shelf.ts';

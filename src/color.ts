@@ -25,7 +25,7 @@ export function toCss(c: Rgb): string {
  * Quantize a 24-bit color to a coarser key for atlas bucketing when color must
  * be baked into the glyph (subpixel AA, colored fallback). Default renderer
  * tints monochrome glyphs and does NOT use this; it exists for the fg-quant
- * atlas mode documented in DESIGN.md. Buckets each channel to 5 bits (RGB555).
+ * atlas mode documented in docs/limits.md. Buckets each channel to 5 bits (RGB555).
  */
 export function quantize(c: Rgb): number {
   return ((r(c) >> 3) << 10) | ((g(c) >> 3) << 5) | (b(c) >> 3);

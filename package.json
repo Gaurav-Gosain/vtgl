@@ -13,8 +13,8 @@
   "files": [
     "dist",
     "src",
-    "DESIGN.md",
-    "BENCHMARKS.md",
+    "docs",
+    "THIRD-PARTY.md",
     "README.md",
     "LICENSE"
   ],

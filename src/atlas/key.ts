@@ -12,7 +12,7 @@
 //
 // Baked (fg-quant) mode key:    `${grapheme}\u0001${styleMask}\u0001${fgQuant}`
 //   For renderers that bake foreground into the glyph (e.g. subpixel AA). The
-//   trailing fg bucket is the only difference; DESIGN.md explains when to use it.
+//   trailing fg bucket is the only difference; docs/architecture.md explains it.
 
 import { CellFlags } from '../types.ts';
 import { quantize } from '../color.ts';

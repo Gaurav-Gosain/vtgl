@@ -79,7 +79,11 @@ export interface CursorState {
   y: number;
   visible: boolean;
   shape: CursorShape;
-  /** Whether the cursor is in a blinking state right now. */
+  /**
+   * Whether the cursor is in its visible blink phase right now. Part of the
+   * contract; neither backend reads it and neither runs a blink clock. A host
+   * that wants a blinking cursor toggles `visible` and requests a frame.
+   */
   blink: boolean;
 }
 
@@ -120,7 +124,8 @@ export interface VtSource {
 
   /**
    * DEC/ANSI mode query, e.g. synchronized output (2026) or cursor visibility.
-   * Optional; a source may return false for everything.
+   * Optional, and no backend calls it today; a driver that wants to defer
+   * frames during an atomic update does so by not calling requestRender.
    */
   getMode?(mode: number): boolean;
 }
@@ -138,12 +143,15 @@ export interface Theme {
   cursor: Rgb;
   /** Text color under a block cursor; defaults to `background` if omitted. */
   cursorText?: Rgb;
-  /** Selection highlight color; renderer overlays it, source is not consulted. */
+  /**
+   * Selection highlight color. Declared for hosts and future use; no backend
+   * draws selection today, so a host that wants it draws its own overlay.
+   */
   selection?: Rgb;
   /**
-   * Optional 256-entry ANSI palette. Sources that resolve colors themselves
-   * (ghostty-vt does) never need this; it exists for sources that emit palette
-   * indices instead of RGB.
+   * Optional 256-entry ANSI palette. Declared for sources that emit palette
+   * indices instead of RGB; no backend reads it today, because both expect the
+   * source to have resolved colors already (ghostty-vt does).
    */
   palette?: Uint32Array | readonly number[];
 }
@@ -167,8 +175,9 @@ export interface RendererOptions {
    */
   resolveInverse?: boolean;
   /**
-   * Optional run shaper hook (see ShaperHook). When absent, each cell is its
-   * own single-grapheme run.
+   * Optional run shaper hook (see ShaperHook). Accepted and currently ignored:
+   * no backend groups runs or calls shapeRun, so every cell is its own
+   * single-grapheme run either way.
    */
   shaper?: ShaperHook;
 }
@@ -193,10 +202,14 @@ export interface Metrics {
   lineHeight: number;
 }
 
-/** Absolute grid coordinate returned by hit testing. */
+/**
+ * A grid coordinate. The row's frame of reference depends on the producer:
+ * cellAtPixel/pixelForCell use a VIEWPORT row in [0, rows), while the
+ * cursorMove event reports an ABSOLUTE buffer row taken from CursorState.y.
+ * Add viewportY to a hit-test row to get an absolute one.
+ */
 export interface CellCoord {
   col: number;
-  /** Absolute buffer row. */
   row: number;
 }
 
@@ -226,6 +239,8 @@ export interface RenderStats {
 
 export interface RendererEventMap {
   render: RenderStats;
+  /** Declared so a host can route a bell through this emitter. Never emitted
+   *  by the renderer, which has no VT event stream to raise it from. */
   bell: void;
   cursorMove: CellCoord;
 }
@@ -268,10 +283,14 @@ export interface Renderer {
 
   getMetrics(): Metrics;
 
-  /** Map a CSS-pixel point (relative to the canvas) to a grid cell, or null. */
+  /**
+   * Map a CSS-pixel point (relative to the canvas) to a grid cell, or null when
+   * the point is outside the grid. The returned row is VIEWPORT-relative,
+   * [0, rows); add viewportY for an absolute buffer row.
+   */
   cellAtPixel(px: number, py: number): CellCoord | null;
 
-  /** Map a grid cell to its CSS-pixel rectangle. */
+  /** Map a viewport-relative grid cell to its CSS-pixel rectangle. */
   pixelForCell(col: number, row: number): PixelRect;
 
   // Event emitter surface.
@@ -320,11 +339,12 @@ export interface ShapedRun {
 }
 
 /**
- * Optional contextual shaper. The renderer groups contiguous cells of identical
- * style into runs and, when a shaper is present, asks it to shape the run text;
- * the returned glyphs are rastered and atlas-keyed by ShapedGlyph.atlasKey. This
- * is the hook that lets Arabic contextual joining land later without touching
- * the atlas or pipeline. Absent a shaper, each cell is a length-1 run whose
+ * Optional contextual shaper. This is a designed seam, not a working one: no
+ * backend calls shapeRun today. The intent is that the renderer groups
+ * contiguous cells of identical style into runs, asks a shaper to shape the run
+ * text, and rasters the returned glyphs under ShapedGlyph.atlasKey. That is the
+ * hook that would let Arabic contextual joining land without touching the atlas
+ * or the pipeline. Today, and absent a shaper, each cell is a length-1 run whose
  * atlas key is its grapheme string.
  */
 export interface ShaperHook {
