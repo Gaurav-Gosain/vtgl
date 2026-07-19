@@ -123,6 +123,15 @@ npm run build:vendor   # dist/vtgl.vendor.js (33 KB minified, dependency-free)
 
 Node 24 or newer is required for the type-stripping test runner; the build itself needs only esbuild and typescript.
 
+The examples below import from `vtgl`, which is the package name in
+`package.json`. Since there is nothing to install from the registry, make that
+specifier resolve by installing the checkout itself (`npm install /path/to/vtgl`
+from your project), or import `dist/index.js` by path. `dist/vtgl.vendor.js` is
+minified ESM with the same named exports, so a page served over http can
+`import { createRenderer } from './vtgl.vendor.js'` from a `<script type="module">`
+with no npm involved at all. That last route needs a real origin rather than a
+`file://` path, because browsers refuse module scripts over `file://`.
+
 A minimal mount, in order (`mount` before `resize`, `resize` before `render`):
 
 ```ts
