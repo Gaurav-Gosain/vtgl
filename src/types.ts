@@ -77,14 +77,13 @@ export interface CursorState {
   x: number;
   /** Row, 0-based, in absolute buffer coordinates (scrollbackRows + active row). */
   y: number;
+  /**
+   * Whether to draw the cursor at all. A host that wants a blinking cursor owns
+   * the clock and toggles this, because the renderer has none: see the blinking
+   * cursor example in the README.
+   */
   visible: boolean;
   shape: CursorShape;
-  /**
-   * Whether the cursor is in its visible blink phase right now. Part of the
-   * contract; neither backend reads it and neither runs a blink clock. A host
-   * that wants a blinking cursor toggles `visible` and requests a frame.
-   */
-  blink: boolean;
 }
 
 /**
@@ -121,13 +120,6 @@ export interface VtSource {
    * may return true always (correct, just slower).
    */
   isRowDirty(row: number): boolean;
-
-  /**
-   * DEC/ANSI mode query, e.g. synchronized output (2026) or cursor visibility.
-   * Optional, and no backend calls it today; a driver that wants to defer
-   * frames during an atomic update does so by not calling requestRender.
-   */
-  getMode?(mode: number): boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -143,17 +135,6 @@ export interface Theme {
   cursor: Rgb;
   /** Text color under a block cursor; defaults to `background` if omitted. */
   cursorText?: Rgb;
-  /**
-   * Selection highlight color. Declared for hosts and future use; no backend
-   * draws selection today, so a host that wants it draws its own overlay.
-   */
-  selection?: Rgb;
-  /**
-   * Optional 256-entry ANSI palette. Declared for sources that emit palette
-   * indices instead of RGB; no backend reads it today, because both expect the
-   * source to have resolved colors already (ghostty-vt does).
-   */
-  palette?: Uint32Array | readonly number[];
 }
 
 export interface RendererOptions {
@@ -239,9 +220,6 @@ export interface RenderStats {
 
 export interface RendererEventMap {
   render: RenderStats;
-  /** Declared so a host can route a bell through this emitter. Never emitted
-   *  by the renderer, which has no VT event stream to raise it from. */
-  bell: void;
   cursorMove: CellCoord;
 }
 

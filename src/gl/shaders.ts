@@ -1,4 +1,4 @@
-// GLSL ES 3.00 shader sources for the four instanced passes. Geometry is a unit
+// GLSL ES 3.00 shader sources for the five instanced passes. Geometry is a unit
 // quad expanded from gl_VertexID (drawArraysInstanced, TRIANGLE_STRIP, 4 verts),
 // so there is no vertex buffer. The per-cell grid position is derived from
 // gl_InstanceID and u_cols, keeping the big passes to one small instance record.
@@ -6,10 +6,25 @@
 // Color packing: fg/bg/decoration colors are 24-bit 0xRRGGBB uints. Style bits:
 // bit0 colored, bit1 faint, bit2 blink, bits 8..15 atlas page (texture array
 // layer). See renderer/instances.ts StyleBit.
+//
+// Row ring: the instance streams are addressed by SLOT, not by screen row. Slot
+// s holds screen row (s - u_slotBase) mod u_rows, so scrolling the viewport is a
+// change of u_slotBase and nothing else. Every grid pass therefore has to map
+// its slot back to a screen row before it can place its quad; screenRow() is
+// that map, and it is the one thing the scroll fast path depends on.
 
 const QUAD = /* glsl */ `
   vec2 quadCorner() {
     return vec2(float(gl_VertexID & 1), float((gl_VertexID >> 1) & 1));
+  }
+`;
+
+const RING = /* glsl */ `
+  uniform int u_slotBase;
+  uniform int u_rows;
+  int screenRow(int slot) {
+    int r = slot - u_slotBase;
+    return r < 0 ? r + u_rows : r;
   }
 `;
 
@@ -40,9 +55,10 @@ flat out vec4 v_color;
 ${QUAD}
 ${UNPACK_RGB}
 ${CLIP}
+${RING}
 void main() {
   int col = gl_InstanceID % u_cols;
-  int row = gl_InstanceID / u_cols;
+  int row = screenRow(gl_InstanceID / u_cols);
   vec2 corner = quadCorner();
   vec2 px = (vec2(float(col), float(row)) + corner) * u_cellSize;
   gl_Position = toClip(px, u_resolution);
@@ -71,9 +87,10 @@ flat out uint v_style;
 ${QUAD}
 ${UNPACK_RGB}
 ${CLIP}
+${RING}
 void main() {
   int col = gl_InstanceID % u_cols;
-  int row = gl_InstanceID / u_cols;
+  int row = screenRow(gl_InstanceID / u_cols);
   vec2 corner = quadCorner();
   vec2 cellOrigin = vec2(float(col), float(row)) * u_cellSize;
   vec2 px = cellOrigin + a_glyphOff + corner * a_atlas.zw;
@@ -130,7 +147,33 @@ void main() {
   v_style = a_style;
 }`;
 
-// Solid-rect program shared by decorations and the cursor rect.
+// Decoration program: underline and strikethrough quads, two instances per cell.
+// The instance's y is RELATIVE TO ITS ROW, not absolute, because the row a slot
+// draws at is decided here by the ring rather than baked in at build time. That
+// is what lets a scroll leave the decoration stream untouched.
+export const decoVert = `#version 300 es
+precision highp float;
+layout(location = 0) in vec4 a_rect;  // x, w, h in device px; y relative to the row top
+layout(location = 1) in uint a_color; // packed 0xRRGGBB
+uniform vec2 u_resolution;
+uniform vec2 u_cellSize;
+uniform int u_cols;
+uniform int u_perCell;
+flat out vec4 v_color;
+${QUAD}
+${UNPACK_RGB}
+${CLIP}
+${RING}
+void main() {
+  int row = screenRow(gl_InstanceID / u_perCell / u_cols);
+  vec2 corner = quadCorner();
+  vec2 origin = vec2(a_rect.x, float(row) * u_cellSize.y + a_rect.y);
+  vec2 px = origin + corner * a_rect.zw;
+  gl_Position = toClip(px, u_resolution);
+  v_color = vec4(unpackRgb(a_color), 1.0);
+}`;
+
+// Solid-rect program for the cursor rect, positioned in absolute device px.
 export const solidVert = `#version 300 es
 precision highp float;
 layout(location = 0) in vec4 a_rect;  // device-px x, y, w, h

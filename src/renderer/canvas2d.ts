@@ -5,6 +5,12 @@
 // (MIT), written fresh here: dirty-row redraw, blank-cell skip, wide-char
 // spacer handling, and font/fill string caches. This is the correctness
 // reference the WebGL2 core must match pixel-decision-for-pixel-decision.
+//
+// Scrolling shifts the pixels instead of repainting them: the canvas is blitted
+// onto itself by the scroll delta and only the rows the scroll uncovered are
+// redrawn. That is the 2D counterpart of the WebGL2 slot rotation, and it holds
+// for the same reason, that a row's pixels do not depend on which screen row it
+// last drew at.
 
 import { CellFlags } from '../types.ts';
 import { Emitter } from '../events.ts';
@@ -13,6 +19,7 @@ import { computeCellMetrics, measureFont } from './metrics.ts';
 import { RenderScheduler } from './scheduler.ts';
 import type {
   CellCoord,
+  CursorState,
   LineView,
   Metrics,
   PixelRect,
@@ -60,8 +67,18 @@ export class Canvas2DRenderer implements Renderer {
   private lastCursorKey = -1;
   // Viewport row drawn at the top of the last frame. Scrolling changes which
   // absolute rows map to which screen rows without dirtying any of them, so a
-  // change here has to force a full repaint or the screen keeps stale content.
+  // change here drives the pixel shift below.
   private lastViewportY = -1;
+  // Absolute row the cursor was painted on last frame, and the state it was
+  // painted in. The cursor lives in the same pixels as the text, so when it
+  // moves, the row it left has to be repainted or the old block survives there.
+  private prevCursorRow = -1;
+  private prevCursorKey = -1;
+  // Whether the last painted rows contained a blinking cell, and which phase
+  // they were painted in. Only meaningful together: a phase flip dirties no row,
+  // so it has to force a repaint of its own, and only when something blinks.
+  private hasBlink = false;
+  private lastBlinkOn = false;
 
   private readonly fontCache = new Map<number, string>();
   private readonly fillCache = new Map<number, string>();
@@ -154,8 +171,24 @@ export class Canvas2DRenderer implements Renderer {
     }
 
     const t0 = now();
-    const full = this.forceFull || viewportY !== this.lastViewportY;
+    let full = this.forceFull;
+    let scrolled = 0;
+    const delta = this.lastViewportY < 0 ? 0 : viewportY - this.lastViewportY;
     this.lastViewportY = viewportY;
+    if (!full && delta !== 0) {
+      // Past a viewport's worth of movement no pixel on screen survives, so the
+      // shift would uncover every row anyway and a full repaint is cheaper.
+      if (delta <= -this.rows || delta >= this.rows) full = true;
+      else scrolled = delta;
+    }
+
+    // A blinking cell changes with the clock rather than with the source, and
+    // the flip marks nothing dirty, so repaint everything on the frame it lands.
+    const blinkOn = blinkPhase();
+    if (!full && this.hasBlink && blinkOn !== this.lastBlinkOn) full = true;
+    this.lastBlinkOn = blinkOn;
+    if (full) this.hasBlink = false;
+
     let dirtyRows = 0;
     let glyphs = 0;
 
@@ -164,16 +197,37 @@ export class Canvas2DRenderer implements Renderer {
     if (full) {
       ctx.fillStyle = this.fill(this.theme.background);
       ctx.fillRect(0, 0, this.cols * this.cellW, this.rows * this.cellH);
+    } else if (scrolled !== 0) {
+      // Self-blit. The 2D spec snapshots the source bitmap, so an overlapping
+      // copy is well defined, and at an integer offset with no scaling it is an
+      // exact move of the pixels rather than a resample.
+      ctx.drawImage(this.canvas as HTMLCanvasElement, 0, -scrolled * this.cellH);
     }
+
+    // Rows the shift uncovered. They are repainted whether or not the source
+    // calls them dirty: their pixels came from the row that just left the far
+    // edge of the viewport.
+    const exposedFrom = scrolled > 0 ? this.rows - scrolled : 0;
+    const exposedTo = scrolled < 0 ? -scrolled : scrolled > 0 ? this.rows : 0;
+
+    // The blit moves the old cursor along with the row it sits on, which is
+    // right, but a cursor that also moved leaves a copy behind. Repaint the row
+    // it was on; nothing else will, because cursor movement is not damage.
+    const cursorKey = cursorStateKey(source.getCursor());
+    const staleCursorRow = cursorKey === this.prevCursorKey ? -1 : this.prevCursorRow;
 
     for (let vr = 0; vr < this.rows; vr++) {
       const absRow = viewportY + vr;
-      if (!full && !source.isRowDirty(absRow)) continue;
+      const exposed = vr >= exposedFrom && vr < exposedTo;
+      if (!full && !exposed && absRow !== staleCursorRow && !source.isRowDirty(absRow)) {
+        continue;
+      }
       dirtyRows++;
-      glyphs += this.drawRow(ctx, source.getLine(absRow), vr, full);
+      glyphs += this.drawRow(ctx, source.getLine(absRow), vr, full, blinkOn);
     }
 
     glyphs += this.drawCursor(ctx, source, viewportY);
+    this.prevCursorKey = cursorKey;
 
     this.forceFull = false;
 
@@ -188,7 +242,13 @@ export class Canvas2DRenderer implements Renderer {
     this.emitter.emit('render', stats);
   }
 
-  private drawRow(ctx: Ctx2D, line: LineView, vr: number, full: boolean): number {
+  private drawRow(
+    ctx: Ctx2D,
+    line: LineView,
+    vr: number,
+    full: boolean,
+    blinkOn: boolean,
+  ): number {
     const y = vr * this.cellH;
     const defaultBg = this.theme.background;
 
@@ -232,16 +292,26 @@ export class Canvas2DRenderer implements Renderer {
 
       if (blank || flags & CellFlags.INVISIBLE) continue;
 
+      // Blink hides the glyph for half of each phase, matching the alpha gate in
+      // the WebGL2 glyph shader. Decorations keep drawing there, so they do here.
+      let blinking = false;
+      if (flags & CellFlags.BLINK) {
+        this.hasBlink = true;
+        blinking = true;
+      }
+
       const grapheme = line.grapheme(col);
       if (grapheme.length === 0) continue;
 
-      ctx.font = this.font(flags);
-      const alpha = flags & CellFlags.FAINT ? 0.5 : 1;
-      if (alpha !== 1) ctx.globalAlpha = alpha;
-      ctx.fillStyle = this.fill(fg);
-      ctx.fillText(grapheme, x, y + this.baseline);
-      if (alpha !== 1) ctx.globalAlpha = 1;
-      glyphs++;
+      if (!blinking || blinkOn) {
+        ctx.font = this.font(flags);
+        const alpha = flags & CellFlags.FAINT ? 0.5 : 1;
+        if (alpha !== 1) ctx.globalAlpha = alpha;
+        ctx.fillStyle = this.fill(fg);
+        ctx.fillText(grapheme, x, y + this.baseline);
+        if (alpha !== 1) ctx.globalAlpha = 1;
+        glyphs++;
+      }
 
       if (flags & (CellFlags.UNDERLINE | CellFlags.STRIKETHROUGH)) {
         this.drawDecorations(ctx, flags, x, y, span, fg);
@@ -272,9 +342,11 @@ export class Canvas2DRenderer implements Renderer {
 
   private drawCursor(ctx: Ctx2D, source: VtSource, viewportY: number): number {
     const cur = source.getCursor();
+    this.prevCursorRow = -1;
     if (!cur.visible) return 0;
     const vr = cur.y - viewportY;
     if (vr < 0 || vr >= this.rows || cur.x < 0 || cur.x >= this.cols) return 0;
+    this.prevCursorRow = cur.y;
 
     const key = (cur.y << 20) | (cur.x << 4) | cursorShapeBit(cur.shape);
     if (key !== this.lastCursorKey) {
@@ -415,6 +487,22 @@ export class Canvas2DRenderer implements Renderer {
 
 function cursorShapeBit(shape: string): number {
   return shape === 'bar' ? 1 : shape === 'underline' ? 2 : 0;
+}
+
+/** Everything about the cursor that changes which pixels it occupies. */
+function cursorStateKey(cur: CursorState): number {
+  if (!cur.visible) return -1;
+  return (cur.y << 20) | (cur.x << 4) | cursorShapeBit(cur.shape);
+}
+
+/**
+ * Visible half of the blink phase, matching `step(0.5, fract(u_time))` in the
+ * glyph fragment shader with `u_time = performance.now() / 500`. vtgl owns no
+ * clock: the phase only advances on screen while something requests frames.
+ */
+function blinkPhase(): boolean {
+  const t = now() / 500;
+  return t - Math.floor(t) >= 0.5;
 }
 
 function globalDpr(): number {

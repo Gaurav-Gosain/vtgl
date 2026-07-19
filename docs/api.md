@@ -38,7 +38,6 @@ interface VtSource {
   getGraphemeString(row: number, col: number): string;
   getCursor(): CursorState;
   isRowDirty(row: number): boolean;
-  getMode?(mode: number): boolean;
 }
 ```
 
@@ -48,9 +47,10 @@ screen.
 
 `getLine` is the only accessor on the hot path; `getCell` and
 `getGraphemeString` exist for host convenience and are called by no render path.
-`getMode` is declared for DEC/ANSI mode queries such as 2026 synchronized
-output, and neither backend calls it; a host that wants to defer frames during
-an atomic update does that in its own driver by not calling `requestRender`.
+
+There is no mode query. A host that wants to defer frames during a synchronized
+update (DEC 2026) does that in its own driver, by not calling `requestRender`
+until the update closes, which is where the decision belongs.
 
 ### LineView
 
@@ -96,7 +96,6 @@ interface CursorState {
   y: number;                             // absolute buffer row
   visible: boolean;
   shape: 'block' | 'bar' | 'underline';
-  blink: boolean;                        // not read by either backend
 }
 ```
 
@@ -105,8 +104,13 @@ block cursor paints the cell in `theme.cursor` and repaints the covered glyph in
 `theme.cursorText` (defaulting to `theme.background`). Bar and underline cursors
 are `max(1, round(dpr * 2))` device pixels thick.
 
-Neither backend runs a blink clock or reads `blink`. A host that wants a
-blinking cursor toggles `visible` in its own source and requests a frame.
+There is no `blink` field and no blink clock: the renderer draws when it is
+asked to. A host that wants a blinking cursor toggles `visible` in its own
+source on its own timer and calls `requestRender`.
+
+Canvas2D repaints the row a moved cursor left, because the cursor lives in the
+same pixels as the text and its movement is not damage. Without that, a block
+cursor would survive on a row the source never marks dirty.
 
 ### CellFlags
 
@@ -154,8 +158,6 @@ interface Theme {
   background: Rgb;
   cursor: Rgb;
   cursorText?: Rgb;  // defaults to background
-  selection?: Rgb;   // declared; no backend draws selection
-  palette?: Uint32Array | readonly number[];  // declared; never read
 }
 ```
 
@@ -165,6 +167,10 @@ and the Canvas2D blank-cell skip test. `foreground` is read by neither backend:
 every glyph takes its color from the cell's own `fg`, so `foreground` is there
 for a host adapter to substitute when its VT reports a default-color sentinel.
 `cursor` and `cursorText` are read on every visible-cursor frame.
+
+There is no selection color and no palette. Selection is a host concern, drawn
+as the host's own overlay over the canvas, and colors arrive from the source
+already resolved to 24-bit RGB, so the renderer has no palette to index.
 
 ## Renderer
 
@@ -235,24 +241,23 @@ nothing else. CSS size is the host's job: divide `canvasWidth`/`canvasHeight` by
 ```ts
 interface RendererEventMap {
   render: RenderStats;
-  bell: void;        // declared; never emitted
   cursorMove: CellCoord;
 }
 
 interface RenderStats {
-  dirtyRows: number;     // rows rebuilt this frame
+  dirtyRows: number;     // rows rebuilt this frame, including rows a scroll uncovered
   glyphs: number;        // glyph instances (WebGL2) or fillText calls (Canvas2D)
   drawCalls: number;     // 3 to 5 on WebGL2; always 1 on Canvas2D
   atlasUploads: number;  // raster and upload count this frame; 0 on Canvas2D
-  full: boolean;         // whether this frame was a full rebuild
+  full: boolean;         // mount, resize, setTheme, or a scroll past the viewport
   cpuMs: number;         // time inside render()
 }
 ```
 
 `on()` returns an unsubscribe function. `cursorMove` fires when the cursor's
 absolute row, column or shape changes and the cursor is visible within the drawn
-viewport. `bell` exists because a host may want to route one through the same
-emitter; the renderer has no VT event stream to raise it from.
+viewport. There is no bell event: the renderer sees no VT event stream and has
+nothing to raise one from, so a host routes its bell through its own emitter.
 
 `glyphs` counts only the grid; the glyph drawn under a block cursor is not
 included on either backend.

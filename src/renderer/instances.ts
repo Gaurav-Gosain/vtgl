@@ -10,6 +10,13 @@
 //   decoration: 2 instances per cell (underline, strikethrough), 5 x 32-bit each
 // Blank/spacer cells and undecorated cells emit zero-area quads, so a single
 // full-grid instanced draw covers every cell with no per-cell branching on GPU.
+//
+// The streams are addressed by SLOT, a row index in [0, rows) that the renderer
+// maps to a screen row through a rotating base (see the row ring in
+// gl/shaders.ts). Nothing written here may encode a screen position: that is the
+// invariant that lets a scroll rotate the base instead of rebuilding rows, so
+// decoration quads carry a y relative to their own row rather than an absolute
+// device-pixel y.
 
 import { CellFlags } from '../types.ts';
 import { styleMask } from '../atlas/key.ts';
@@ -113,18 +120,18 @@ export class InstanceBuffers {
     this.resolveInverse = resolveInverse;
   }
 
-  /** Byte offset/length of a viewport-row slice in the background buffer. */
-  bgRange(vr: number): { offset: number; length: number } {
-    return { offset: vr * this.cols * 4, length: this.cols * 4 };
+  /** Byte offset/length of one slot's slice in the background buffer. */
+  bgRange(slot: number): { offset: number; length: number } {
+    return { offset: slot * this.cols * 4, length: this.cols * 4 };
   }
 
-  glyphRange(vr: number): { offset: number; length: number } {
-    return { offset: vr * this.cols * GLYPH_UNITS * 4, length: this.cols * GLYPH_UNITS * 4 };
+  glyphRange(slot: number): { offset: number; length: number } {
+    return { offset: slot * this.cols * GLYPH_UNITS * 4, length: this.cols * GLYPH_UNITS * 4 };
   }
 
-  decoRange(vr: number): { offset: number; length: number } {
+  decoRange(slot: number): { offset: number; length: number } {
     const perRow = this.cols * DECO_PER_CELL * DECO_UNITS * 4;
-    return { offset: vr * perRow, length: perRow };
+    return { offset: slot * perRow, length: perRow };
   }
 
   /** Total instance counts for the draw calls. */
@@ -136,23 +143,34 @@ export class InstanceBuffers {
   }
 
   /**
-   * Recompute one viewport row (0..rows-1) reading absolute source row `absRow`.
-   * Fills the row's slice of all three streams. Blank/spacer cells and
-   * undecorated cells become zero-area quads.
+   * Fill the background slice of one slot with a flat color. Used before
+   * rebuilding a slot whose previous occupant is unrelated to the incoming row:
+   * a row that opens on a width-0 spacer would otherwise inherit the old
+   * occupant's background in that cell, since only a wide head writes one.
+   */
+  clearSlotBg(slot: number, color: number): void {
+    const start = slot * this.cols;
+    this.bg.fill(color & 0xffffff, start, start + this.cols);
+  }
+
+  /**
+   * Recompute one slot (0..rows-1) reading absolute source row `absRow`. Fills
+   * the slot's slice of all three streams. Blank/spacer cells and undecorated
+   * cells become zero-area quads. Nothing written depends on which screen row
+   * the slot currently draws at.
    */
   buildRow(
     source: VtSource,
     absRow: number,
-    vr: number,
+    slot: number,
     provider: GlyphProvider,
   ): RowBuildResult {
     const line = source.getLine(absRow);
     const cols = this.cols;
-    const y = vr * this.cellH;
     let glyphs = 0;
 
     for (let col = 0; col < cols; col++) {
-      const cellIdx = vr * cols + col;
+      const cellIdx = slot * cols + col;
       const gBase = cellIdx * GLYPH_UNITS;
       const dBase = cellIdx * DECO_PER_CELL * DECO_UNITS;
 
@@ -211,16 +229,17 @@ export class InstanceBuffers {
       this.glyphU32[gBase + 7] = style;
       glyphs++;
 
-      // Decorations as solid quads spanning the glyph's columns.
+      // Decorations as solid quads spanning the glyph's columns. y is relative
+      // to the row top; the shader adds the row offset (see the row ring).
       if (flags & (CellFlags.UNDERLINE | CellFlags.STRIKETHROUGH)) {
         const span = spanCols * this.cellW;
         const thickness = Math.max(1, Math.round(this.dpr));
         if (flags & CellFlags.UNDERLINE) {
-          const uy = y + Math.min(this.cellH - thickness, this.baseline + thickness);
+          const uy = Math.min(this.cellH - thickness, this.baseline + thickness);
           this.writeDeco(dBase, x, uy, span, thickness, fg);
         }
         if (flags & CellFlags.STRIKETHROUGH) {
-          const sy = y + Math.round(this.cellH * 0.5);
+          const sy = Math.round(this.cellH * 0.5);
           this.writeDeco(dBase + DECO_UNITS, x, sy, span, thickness, fg);
         }
       }

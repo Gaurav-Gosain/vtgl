@@ -20,7 +20,6 @@ interface VtSource {
   getGraphemeString(row: number, col: number): string;
   getCursor(): CursorState;
   isRowDirty(row: number): boolean;
-  getMode?(mode: number): boolean;
 }
 ```
 
@@ -30,6 +29,10 @@ spacer tail after a wide cell), returns whole grapheme clusters on the head cell
 of a cluster, and hands back resolved 24-bit colors rather than palette indices.
 The contract is read-only in both directions: the renderer never mutates the
 source, and never clears the dirty flags it reads.
+
+Damage is also what the scroll fast path trusts. A row that enters the viewport
+is always rebuilt, so a source only has to be right about rows that were already
+on screen, which is the same guarantee the incremental path has always needed.
 
 The costs are asymmetric. A VT that already tracks per-row damage is nearly free
 to adapt. A VT with no damage tracking still works if `isRowDirty` returns true

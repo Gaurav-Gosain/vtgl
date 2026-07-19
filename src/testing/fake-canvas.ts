@@ -4,7 +4,7 @@
 // a DOM or GPU. Browser pixel tests run separately under Playwright.
 
 export interface RecordedOp {
-  op: 'fillRect' | 'fillText' | 'clearRect';
+  op: 'fillRect' | 'fillText' | 'clearRect' | 'drawImage';
   x: number;
   y: number;
   w?: number;
@@ -38,6 +38,15 @@ export class RecordingContext2D {
 
   clearRect(x: number, y: number, w: number, h: number): void {
     this.ops.push({ op: 'clearRect', x, y, w, h, fillStyle: this.fillStyle, font: this.font, globalAlpha: this.globalAlpha });
+  }
+
+  /**
+   * Recorded, not simulated. The renderer blits the canvas onto itself to shift
+   * rows on a scroll; there are no pixels here, so tests assert that the shift
+   * was issued at the right offset and that the uncovered rows were repainted.
+   */
+  drawImage(_image: unknown, x: number, y: number): void {
+    this.ops.push({ op: 'drawImage', x, y, fillStyle: this.fillStyle, font: this.font, globalAlpha: this.globalAlpha });
   }
 
   fillText(text: string, x: number, y: number): void {

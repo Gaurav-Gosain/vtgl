@@ -37,7 +37,6 @@ export class FakeSource implements VtSource {
   private readonly lineViews: LineView[];
   private readonly defaultFg: Rgb;
   private readonly defaultBg: Rgb;
-  private readonly modes = new Map<number, boolean>();
 
   private cursor: CursorState;
 
@@ -70,7 +69,6 @@ export class FakeSource implements VtSource {
       y: this.scrollbackRows,
       visible: true,
       shape: 'block',
-      blink: false,
     };
 
     this.lineViews = new Array(this.total);
@@ -113,10 +111,6 @@ export class FakeSource implements VtSource {
     return this.dirty[row] === 1;
   }
 
-  getMode(mode: number): boolean {
-    return this.modes.get(mode) ?? false;
-  }
-
   // --- scripting API ------------------------------------------------------
 
   /** Clear all dirty flags. Call this after a frame, as a real driver would. */
@@ -126,10 +120,6 @@ export class FakeSource implements VtSource {
 
   markDirty(row: number): void {
     this.dirty[row] = 1;
-  }
-
-  setMode(mode: number, on: boolean): void {
-    this.modes.set(mode, on);
   }
 
   setCursor(partial: Partial<CursorState>): void {

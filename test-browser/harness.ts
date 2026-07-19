@@ -31,7 +31,9 @@ interface Harness {
   damageProbe(): RenderStats[];
   scrollProbe(): {
     pixelsChanged: boolean;
-    scrollForcedFull: boolean;
+    scrollFull: boolean;
+    scrollDirtyRows: number;
+    beyondViewportFull: boolean;
     stationaryFull: boolean;
     stationaryDirtyRows: number;
   };
@@ -44,6 +46,14 @@ interface Harness {
     afterFull: boolean;
     afterUploads: number;
   }>;
+  /**
+   * The scroll fast path against a forced full rebuild of the same frame. Every
+   * case must come out pixel-identical, because that equivalence is the entire
+   * correctness argument for shifting instead of repainting.
+   */
+  scrollEquivalence(backend: 'webgl2' | 'canvas2d'): ScrollCaseResult[];
+  /** Ink on a blinking cell sampled across a blink period, in real pixels. */
+  blinkProbe(backend: 'webgl2' | 'canvas2d'): Promise<{ inked: number; blank: number }>;
   atlasProbe(): { first: number; second: number; afterNewGlyph: number };
   drawCallScaling(): Array<{ cells: number; drawCalls: number }>;
   /**
@@ -94,6 +104,18 @@ export interface TortureInk {
   ink: number;
   /** Non-background pixels in the cell immediately past the cluster. */
   bleed: number;
+}
+
+export interface ScrollCaseResult {
+  name: string;
+  /** Rows the fast-path frame actually rebuilt. */
+  dirtyRows: number;
+  /** Whether the fast-path frame fell back to a full rebuild. */
+  full: boolean;
+  /** Pixels differing from the forced full rebuild. Must be 0. */
+  differing: number;
+  total: number;
+  maxChannelDelta: number;
 }
 
 export interface AllocResult {
@@ -318,6 +340,153 @@ function readPixels(canvas: HTMLCanvasElement): ImageData {
   return ctx.getImageData(0, 0, canvas.width, canvas.height);
 }
 
+// --- scroll fast path vs forced full rebuild -------------------------------
+
+const SCROLL_COLS = 32;
+const SCROLL_ROWS = 12;
+const SCROLL_BACK = 40;
+
+interface ScrollCase {
+  name: string;
+  /** Viewport top of the priming frame. */
+  from: number;
+  /** Viewport top of the frame under test. */
+  to: number;
+  /** Writes applied between the two frames, so scroll and damage coincide. */
+  writes?(s: FakeSource): void;
+  /** Cursor state for the frame under test. */
+  cursor?: { x: number; y: number };
+}
+
+/**
+ * A buffer with something in every category whose handling is positional: wide
+ * heads with their spacer tails, decorations, non-default backgrounds, and one
+ * deliberately headless spacer at column 0, which is the only way a rebuilt row
+ * can inherit a background from whatever the slot held before it.
+ */
+function buildScrollSource(): FakeSource {
+  const s = new FakeSource({
+    cols: SCROLL_COLS,
+    rows: SCROLL_ROWS,
+    scrollbackRows: SCROLL_BACK,
+    fg: 0xd0d0d0,
+    bg: 0x101010,
+  });
+  const total = SCROLL_BACK + SCROLL_ROWS;
+  for (let row = 0; row < total; row++) {
+    let col = s.writeText(row, 0, String(row).padStart(3, '0') + ' ', { fg: 0x5c6370 });
+    switch (row % 5) {
+      case 0:
+        s.writeText(row, col, 'plain ascii line');
+        break;
+      case 1:
+        s.writeText(row, col, '世界 wide 漢字');
+        break;
+      case 2:
+        s.writeText(row, col, 'underlined', {
+          fg: 0xe06c75,
+          flags: CellFlags.UNDERLINE | CellFlags.BOLD,
+        });
+        break;
+      case 3:
+        s.writeText(row, col, 'struck out', {
+          fg: 0x98c379,
+          bg: 0x282c34,
+          flags: CellFlags.STRIKETHROUGH | CellFlags.ITALIC,
+        });
+        break;
+      default:
+        // Headless spacer at column 0: no wide head ever writes this cell's
+        // background, so a rebuilt slot must clear it rather than inherit.
+        s.setCell(row, 0, 0, { width: 0 });
+        s.writeText(row, 1, 'tail-spacer row', { bg: 0x3e4451 });
+        break;
+    }
+  }
+  s.setCursor({ visible: true, x: 4, y: 25, shape: 'block' });
+  s.clearDirty();
+  return s;
+}
+
+const SCROLL_CASES: ScrollCase[] = [
+  { name: 'down-one', from: 20, to: 21 },
+  { name: 'up-one', from: 20, to: 19 },
+  { name: 'down-seven', from: 20, to: 27 },
+  { name: 'up-to-top', from: 5, to: 0 },
+  { name: 'beyond-viewport', from: 20, to: 34 },
+  {
+    name: 'scroll-and-write-down',
+    from: 20,
+    to: 22,
+    writes(s) {
+      s.writeText(23, 4, 'EDITED IN FLIGHT', { fg: 0xe5c07b, flags: CellFlags.UNDERLINE });
+      s.writeText(30, 0, '<<<', { bg: 0x61afef });
+    },
+  },
+  {
+    name: 'scroll-and-write-up',
+    from: 20,
+    to: 18,
+    writes(s) {
+      s.writeText(18, 2, '世 edited wide', { flags: CellFlags.STRIKETHROUGH });
+      s.writeText(27, 0, 'bottom edit');
+    },
+  },
+  { name: 'scroll-and-move-cursor', from: 20, to: 23, cursor: { x: 9, y: 27 } },
+  // No scroll and no damage: the cursor moving is the only change, which is the
+  // case that used to strand a block cursor on the row it left.
+  { name: 'cursor-moves-without-damage', from: 20, to: 20, cursor: { x: 17, y: 28 } },
+];
+
+/**
+ * Drive one case twice: once through the fast path on a renderer that was
+ * already showing `from`, once as a first frame on a fresh renderer, which is
+ * always a full rebuild. Read both back and compare exactly.
+ */
+function runScrollCase(
+  backend: 'webgl2' | 'canvas2d',
+  c: ScrollCase,
+): ScrollCaseResult {
+  const apply = (s: FakeSource): void => {
+    c.writes?.(s);
+    if (c.cursor) s.setCursor({ x: c.cursor.x, y: c.cursor.y });
+  };
+
+  const fastSource = buildScrollSource();
+  const fast = build(backend);
+  const fastCanvas = makeCanvas(8, 8);
+  fast.mount(fastCanvas);
+  fast.resize(SCROLL_COLS, SCROLL_ROWS, 1);
+  let last: RenderStats | undefined;
+  fast.on('render', (s) => (last = s));
+  fast.render(fastSource, c.from);
+  fastSource.clearDirty();
+  apply(fastSource);
+  fast.render(fastSource, c.to);
+  const fastPixels = readPixels(fastCanvas);
+
+  const refSource = buildScrollSource();
+  apply(refSource);
+  const ref = build(backend);
+  const refCanvas = makeCanvas(8, 8);
+  ref.mount(refCanvas);
+  ref.resize(SCROLL_COLS, SCROLL_ROWS, 1);
+  ref.render(refSource, c.to);
+  const refPixels = readPixels(refCanvas);
+
+  const d = diff(fastPixels, refPixels, 0);
+  fast.dispose();
+  ref.dispose();
+  return {
+    name: c.name,
+    dirtyRows: last!.dirtyRows,
+    full: last!.full,
+    differing: d.differing,
+    total: d.total,
+    maxChannelDelta: d.maxChannelDelta,
+  };
+}
+
 const harness: Harness = {
   scenarioNames() {
     return allScenarios.map((s) => s.name);
@@ -451,17 +620,17 @@ const harness: Harness = {
   },
 
   scrollProbe() {
-    // 6 scrollback rows above a 3-row screen, each row uniquely colored so a
+    // 12 scrollback rows above a 4-row screen, each row uniquely colored so a
     // stale viewport is visible in the pixels rather than only in the stats.
-    const source = new FakeSource({ cols: 8, rows: 3, scrollbackRows: 6 });
+    const source = new FakeSource({ cols: 8, rows: 4, scrollbackRows: 12 });
     source.setCursor({ visible: false });
-    for (let r = 0; r < 9; r++) {
+    for (let r = 0; r < 16; r++) {
       source.writeText(r, 0, 'row' + r, { bg: 0x010000 * (r + 1) });
     }
     const renderer = build('webgl2');
     const canvas = makeCanvas(8, 8);
     renderer.mount(canvas);
-    renderer.resize(8, 3, 1);
+    renderer.resize(8, 4, 1);
     const stats: RenderStats[] = [];
     renderer.on('render', (s) => stats.push(s));
 
@@ -469,23 +638,67 @@ const harness: Harness = {
     const top = readPixels(canvas).data.slice(0, 4);
     source.clearDirty();
 
-    // Scroll without dirtying anything: the renderer must still repaint.
-    renderer.render(source, 3);
+    // Scroll one row without dirtying anything: only the row that entered the
+    // viewport should be rebuilt, and the screen must still show the new rows.
+    renderer.render(source, 1);
     const scrolled = readPixels(canvas).data.slice(0, 4);
     const scrolledStats = stats[stats.length - 1];
 
+    // A jump larger than the viewport has nothing to reuse.
+    source.clearDirty();
+    renderer.render(source, 9);
+    const beyond = stats[stats.length - 1];
+
     // Rendering the same viewport again must fall back to incremental.
     source.clearDirty();
-    renderer.render(source, 3);
+    renderer.render(source, 9);
     const restated = stats[stats.length - 1];
     renderer.dispose();
 
     return {
       pixelsChanged: top[0] !== scrolled[0] || top[1] !== scrolled[1] || top[2] !== scrolled[2],
-      scrollForcedFull: scrolledStats.full,
+      scrollFull: scrolledStats.full,
+      scrollDirtyRows: scrolledStats.dirtyRows,
+      beyondViewportFull: beyond.full,
       stationaryFull: restated.full,
       stationaryDirtyRows: restated.dirtyRows,
     };
+  },
+
+  scrollEquivalence(backend) {
+    return SCROLL_CASES.map((c) => runScrollCase(backend, c));
+  },
+
+  async blinkProbe(backend) {
+    // Blink is a wall-clock gate with no clock of its own, so the only way to
+    // see it is to keep asking for frames and watch the pixels change. Sampled
+    // per backend rather than compared across the two: a cross-backend diff
+    // straddling a phase boundary would fail for the wrong reason.
+    const source = new FakeSource({ cols: 4, rows: 1, fg: 0xd0d0d0, bg: 0x101010 });
+    source.setCursor({ visible: false });
+    source.setCell(0, 0, 'B'.codePointAt(0)!, { flags: CellFlags.BLINK });
+    const renderer = build(backend);
+    const canvas = makeCanvas(8, 8);
+    renderer.mount(canvas);
+    renderer.resize(4, 1, 1);
+    const m = renderer.getMetrics();
+
+    let inked = 0;
+    let blank = 0;
+    const deadline = Date.now() + 1500;
+    while (Date.now() < deadline && (inked === 0 || blank === 0)) {
+      source.markDirty(0);
+      renderer.render(source, 0);
+      const px = readPixels(canvas);
+      if (inkIn(px, { cellWidth: m.cellWidth, cellHeight: m.cellHeight }, 0, 0, 1) > 0) {
+        inked++;
+      } else {
+        blank++;
+      }
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    renderer.dispose();
+    return { inked, blank };
   },
 
   atlasProbe() {
