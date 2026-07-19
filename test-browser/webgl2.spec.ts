@@ -229,6 +229,128 @@ test('the webgl atlas never lets a cluster escape its cells', async ({ page }) =
   }
 });
 
+// --- contextual shaping --------------------------------------------------
+//
+// The corpus records Arabic as the honest failure: one letter per cell, each
+// drawn in isolated form, so a word does not join. `arabicShaper` fixes that by
+// asking the browser for each letter's contextual form and laying the run out
+// right to left. These assert the change is real in pixels, that it is confined
+// to Arabic, and that the guarantees the rest of the suite rests on still hold.
+
+const ARABIC_WORDS = ['arabic-word', 'arabic-lam-alef'];
+
+test('shaping visibly changes the Arabic words and nothing else', async ({ page }) => {
+  interface RowDiff {
+    name: string;
+    fraction: number;
+    maxChannelDelta: number;
+  }
+  const rows: RowDiff[] = await page.evaluate(() =>
+    (window as any).harness.shapingRowDiff('webgl2'),
+  );
+  const byName = new Map(rows.map((r) => [r.name, r]));
+  for (const name of ARABIC_WORDS) {
+    // A joined word puts ink in materially different places from four isolated
+    // letters. If this ever drops to zero the shaper has silently stopped.
+    expect(
+      byName.get(name)!.fraction,
+      `${name} should look different once shaped`,
+    ).toBeGreaterThan(0.01);
+  }
+  for (const r of rows) {
+    if (ARABIC_WORDS.includes(r.name)) continue;
+    // Everything else, a lone alef included, must be untouched: a shaper that
+    // quietly re-rendered CJK or emoji differently would be a regression hiding
+    // behind an improvement.
+    expect(r.fraction, `${r.name} must be unaffected by the shaper`).toBe(0);
+  }
+});
+
+test('the shaped word matches the Unicode presentation forms', async ({ page }) => {
+  // The ground-truth check, and the one that would catch a shaper that made the
+  // output merely different rather than right. Unicode encodes the four Arabic
+  // joining forms explicitly in Presentation Forms-B, so the expected picture of
+  // salaam is a known string: meem, alef-final, lam-medial, seen-initial, in
+  // that left-to-right order. Rendering that reference through the same
+  // renderer and comparing pixels tests the joining decision and the
+  // right-to-left column assignment at once.
+  for (const backend of ['webgl2', 'canvas2d'] as const) {
+    const r = await page.evaluate(
+      (b) => (window as any).harness.arabicFormCheck(b),
+      backend,
+    );
+    const shapedFraction = r.shaped / r.total;
+    const plainFraction = r.plain / r.total;
+    // Measured at 10/736 on both backends: the residue is edge antialiasing on
+    // glyphs that are otherwise the same picture. The unshaped row sits at
+    // 176/736, so the budget is wide enough to be stable and still nowhere near
+    // admitting a word that failed to join.
+    expect(
+      shapedFraction,
+      `${backend}: shaped salaam differs from the presentation forms by ${r.shaped}/${r.total} px`,
+    ).toBeLessThan(0.04);
+    // And the unshaped rendering is nothing like it, which is the gap being closed.
+    expect(
+      plainFraction,
+      `${backend}: unshaped ${r.plain}/${r.total} vs shaped ${r.shaped}/${r.total}`,
+    ).toBeGreaterThan(0.15);
+  }
+});
+
+test('a joined word puts ink in every cell of the run', async ({ page }) => {
+  for (const backend of ['webgl2', 'canvas2d'] as const) {
+    const after: number[] = await page.evaluate(
+      (b) => (window as any).harness.tortureColumnInk('arabic-word', b, true),
+      backend,
+    );
+    expect(after.length).toBe(4);
+    for (let i = 0; i < after.length; i++) {
+      expect(after[i], `${backend}: shaped column ${i} is empty`).toBeGreaterThan(0);
+    }
+  }
+});
+
+test('the two backends agree on shaped Arabic', async ({ page }) => {
+  // The whole point of fitting each glyph's advance to its cell is that both
+  // backends then draw the same picture: the WebGL atlas has nothing to clip
+  // and Canvas2D has nothing to bleed.
+  for (const name of ARABIC_WORDS) {
+    const gl: number[] = await page.evaluate(
+      (n) => (window as any).harness.tortureColumnInk(n, 'webgl2', true),
+      name,
+    );
+    const c2: number[] = await page.evaluate(
+      (n) => (window as any).harness.tortureColumnInk(n, 'canvas2d', true),
+      name,
+    );
+    for (let i = 0; i < gl.length; i++) {
+      const ratio = gl[i] / c2[i];
+      expect(
+        ratio,
+        `${name} column ${i}: webgl2 ${gl[i]}px vs canvas2d ${c2[i]}px`,
+      ).toBeGreaterThan(0.6);
+      expect(ratio, `${name} column ${i}`).toBeLessThan(1.6);
+    }
+  }
+});
+
+test('shaped glyphs still never escape their cells', async ({ page }) => {
+  // The no-bleed guarantee is what the atlas slot buys, and fitting must not
+  // have traded it away.
+  interface Ink {
+    name: string;
+    ink: number;
+    bleed: number;
+  }
+  const rows: Ink[] = await page.evaluate(() =>
+    (window as any).harness.tortureInk('webgl2', true),
+  );
+  for (const r of rows) {
+    expect(r.ink, `${r.name} drew no ink when shaped`).toBeGreaterThan(0);
+    expect(r.bleed, `${r.name} bled past its cells when shaped`).toBe(0);
+  }
+});
+
 test('every torture cluster draws ink on both backends', async ({ page }) => {
   // The failure this catches is a dropped or blank cluster, which is what a
   // grapheme-unaware renderer produces for ZWJ sequences and tag flags.

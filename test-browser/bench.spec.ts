@@ -113,6 +113,68 @@ function table(rows: BenchResult[]): string {
   return head + '\n' + body.join('\n');
 }
 
+test('contextual shaping cost', async ({ page }) => {
+  // What configuring a shaper costs, measured three ways, because the three
+  // answers are different and a host needs all of them:
+  //
+  //   ascii   no cell the shaper wants. Cost is the per-cell participates()
+  //           scan on every dirty row, which is the tax a host pays for leaving
+  //           the shaper on when the content is not Arabic.
+  //   arabic  almost every cell in a run. Cost is grouping, shaping and
+  //           reordering the whole screen, i.e. the worst case.
+  //   dump    a mixed scrolling workload, as a sanity check.
+  test.setTimeout(900_000);
+  await page.goto(HARNESS_URL);
+  await page.waitForFunction(() => (window as any).harness !== undefined);
+
+  // Paired and interleaved, five rounds. Absolute timings here drift by 2x with
+  // whatever else the machine is doing, so an off-run and an on-run measured
+  // minutes apart are not comparable. Measuring the pair back to back and
+  // reporting the median of the per-round ratios cancels the drift; only the
+  // ratio is meaningful, which is why the raw means are printed as context
+  // rather than as a result.
+  const ROUNDS = 5;
+  const median = (xs: number[]): number => {
+    const s = [...xs].sort((a, b) => a - b);
+    return s[Math.floor(s.length / 2)];
+  };
+
+  const lines: string[] = [];
+  for (const name of ['ascii', 'arabic', 'dump']) {
+    for (const backend of ['webgl2', 'canvas2d'] as const) {
+      const offs: number[] = [];
+      const ons: number[] = [];
+      const ratios: number[] = [];
+      for (let round = 0; round < ROUNDS; round++) {
+        const off: BenchResult = await page.evaluate(
+          ([n, b, f, m, s]) => (window as any).harness.bench(n, b, f, m, s),
+          [name, backend, FRAMES, 'full', false] as const,
+        );
+        const on: BenchResult = await page.evaluate(
+          ([n, b, f, m, s]) => (window as any).harness.bench(n, b, f, m, s),
+          [name, backend, FRAMES, 'full', true] as const,
+        );
+        offs.push(off.cpuMean);
+        ons.push(on.cpuMean);
+        ratios.push(on.cpuMean / Math.max(off.cpuMean, 0.0005));
+      }
+      const r = median(ratios);
+      lines.push(
+        `${name.padEnd(8)} ${backend.padEnd(9)} ` +
+          `off ${median(offs).toFixed(3)}ms  on ${median(ons).toFixed(3)}ms  ` +
+          `median ratio ${r.toFixed(2)}x  ` +
+          `(rounds ${ratios.map((x) => x.toFixed(2)).join(' ')})`,
+      );
+    }
+  }
+  console.log(
+    '\nCPU ms inside render(), shaper off vs on, full repaint, ' +
+      `${ROUNDS} interleaved rounds:\n` +
+      lines.join('\n') +
+      '\n',
+  );
+});
+
 test('full-screen repaint benchmark', async ({ page }) => {
   // Generous: a forced-full repaint of every scenario on both backends under
   // SwiftShader is minutes of software rasterization, not a fast suite.

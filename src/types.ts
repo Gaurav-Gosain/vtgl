@@ -175,9 +175,10 @@ export interface RendererOptions {
    */
   resolveInverse?: boolean;
   /**
-   * Optional run shaper hook (see ShaperHook). Accepted and currently ignored:
-   * no backend groups runs or calls shapeRun, so every cell is its own
-   * single-grapheme run either way.
+   * Optional run shaper hook (see ShaperHook). Both backends honour it. Absent,
+   * every cell is its own single-grapheme run and the renderer behaves exactly
+   * as it did before shaping existed, which is why this is opt-in: `arabicShaper`
+   * reorders cells within a run, and that is a trade a host must choose.
    */
   shaper?: ShaperHook;
 }
@@ -321,16 +322,36 @@ export interface RunStyle {
 export interface ShapedGlyph {
   /**
    * Atlas key for this glyph. Because the atlas keys by string, a shaper can
-   * mint stable per-glyph keys (e.g. `${fontId}:${glyphId}`) and they slot into
-   * the same atlas the default per-grapheme path uses.
+   * mint stable per-glyph keys and they slot into the same atlas the default
+   * per-grapheme path uses. The key must vary with everything that changes the
+   * rastered pixels, `cluster`, `rtl` and `fitAdvance` included: two glyphs that
+   * look different and share a key would collide in the cache.
    */
   atlasKey: string;
   /** The substring to raster for this glyph (contextual form for Arabic, etc). */
   cluster: string;
-  /** Column within the run this glyph advances from. */
+  /**
+   * Column this glyph is drawn in, relative to the start of the run. A shaper
+   * that reorders (see `arabicShaper`) returns a column other than the source
+   * cell's own index, which is how run-local right-to-left ordering is expressed.
+   */
   col: number;
-  /** Horizontal offset in device px from the run origin. */
+  /** Horizontal offset in device px from the column's left edge. */
   xOffset: number;
+  /**
+   * Raster the cluster in a right-to-left context. Chromium's canvas only
+   * applies a following joining context (a trailing ZWJ) when the context is
+   * RTL; under the default LTR direction it is dropped and every Arabic letter
+   * comes back isolated or final. Measured, not assumed: see docs/limits.md.
+   */
+  rtl: boolean;
+  /**
+   * Scale the cluster horizontally so its advance equals the slot width. A
+   * shaped Arabic letter's natural advance has nothing to do with the monospace
+   * cell the VT assigned it, so without this the joining strokes land wherever
+   * the font puts them and do not meet across the cell boundary.
+   */
+  fitAdvance: boolean;
 }
 
 /** Result of shaping one contiguous same-style run of cells. */
@@ -339,14 +360,27 @@ export interface ShapedRun {
 }
 
 /**
- * Optional contextual shaper. This is a designed seam, not a working one: no
- * backend calls shapeRun today. The intent is that the renderer groups
- * contiguous cells of identical style into runs, asks a shaper to shape the run
- * text, and rasters the returned glyphs under ShapedGlyph.atlasKey. That is the
- * hook that would let Arabic contextual joining land without touching the atlas
- * or the pipeline. Today, and absent a shaper, each cell is a length-1 run whose
- * atlas key is its grapheme string.
+ * Optional contextual shaper, honoured by both backends.
+ *
+ * The renderer groups contiguous cells of identical style into runs, asks the
+ * shaper to shape them, and rasters the returned glyphs under
+ * `ShapedGlyph.atlasKey`. Absent a shaper, each cell is a length-1 run whose
+ * atlas key is its grapheme string and nothing about rendering changes.
+ *
+ * shapeRun takes the run's cells rather than one concatenated string. The
+ * original seam passed a string, which cannot be split back into cells: a cell's
+ * grapheme may carry combining marks, so `text.length` and the run's column
+ * count are unrelated and the shaper has no way to answer in the columns the
+ * renderer must draw in. Cells in, columns out.
  */
 export interface ShaperHook {
-  shapeRun(text: string, style: RunStyle): ShapedRun;
+  /**
+   * Whether this code point belongs in a shaped run at all. Called once per cell
+   * on every dirty row, so it must be cheap; it exists so the renderer can skip
+   * the whole run-grouping pass on rows the shaper has no interest in without
+   * knowing which scripts the shaper handles.
+   */
+  participates(codepoint: number): boolean;
+  /** Shape one contiguous same-style run. `cells[i]` is the grapheme at column i. */
+  shapeRun(cells: readonly string[], style: RunStyle): ShapedRun;
 }

@@ -5,30 +5,90 @@ tool. Every gap here was checked against the code rather than remembered.
 
 ## Correctness gaps
 
-### No contextual shaping
+### Contextual shaping is opt-in, Arabic only, and does not do bidi
 
-Arabic joining is wrong, and it is the most visible correctness gap. A
-grapheme-aware VT puts one Arabic letter in each cell (the torture corpus records
-that as the `split` layout, measured against a real ghostty-vt buffer), and vtgl
-draws each cell's cluster in isolation, so the letters render in isolated form
-and a word does not join.
+Arabic joining used to be simply wrong. It is now correct within one run of one
+line, if you ask for it. `RendererOptions.shaper` is honoured by both backends,
+and `arabicShaper()` is the one shaper shipped.
 
-The `ShaperHook` interface is defined, the atlas keys by string so shaped runs
-would slot into the same cache, and the glyph instance already carries a
-per-cell pixel offset for shaped placement. None of it is wired: no backend
-calls `shapeRun`, and the `shaper` option is accepted and dropped.
+What it does. A grapheme-aware VT puts one Arabic letter in each cell (the
+torture corpus records that as the `split` layout, measured against a real
+ghostty-vt buffer). The shaper groups contiguous Arabic cells of uniform style
+into a run, derives each letter's joining context from the Unicode joining
+types, and rasters it with a zero-width joiner on whichever side joins, so the
+browser's own text engine returns the initial, medial, final or isolated form.
+The run's cells are then laid out right to left, and each glyph's advance is
+scaled to its cell so the connecting strokes meet on the cell boundary.
 
-This is not a gap relative to the obvious alternative. xterm.js does not do
-contextual shaping either, so Arabic is not a reason to choose one over the
-other. It is a reason to choose neither if joining matters to you.
+No shaping engine is shipped and no dependency was added. The browser was
+already doing the shaping; the renderer was bypassing it by rasterising one
+isolated cell at a time.
+
+The verification is a ground-truth comparison rather than an eyeball. Unicode
+encodes the four joining forms explicitly in Presentation Forms-B, so the
+expected picture of a word is a known string. Rendering that reference through
+the same renderer and diffing puts shaped salaam 10 pixels of edge antialiasing
+away from it, out of 736, on both backends; unshaped it is 176 pixels away.
+
+**Reordering is why this is opt-in, and it is a real trade.** Reversing a run
+breaks the identity between a cell's index and the column its character is drawn
+in, so inside a shaped run `cellAtPixel` names a cell whose character is
+somewhere else in that run. A host that wants selection or hit testing to line
+up with the buffer should leave the shaper off. Shaping without reordering is
+not offered as a middle ground because it is not one: a joined letter's
+connecting stroke points at its neighbour, and with the letters still in logical
+left-to-right order those strokes point away from each other, which reads worse
+than the isolated forms it replaces.
+
+What it is not:
+
+- **Not the Unicode Bidirectional Algorithm.** Only a maximal run of Arabic-block
+  cells with identical fg, bg and flags is reversed. Neutrals are not resolved,
+  brackets are not mirrored, there is no paragraph direction, and no embedding
+  levels. The one concession is that a span of Arabic-Indic digits inside a run
+  keeps its own digits in reading order, because reversing a number is the kind
+  of quiet wrongness a visible improvement would otherwise hide.
+- **Word order across a space is not reversed.** A space is not an Arabic-block
+  character, so it ends the run. Two Arabic words on a line each join correctly
+  and each read right to left internally, but the words stay in logical order
+  left to right. A full sentence is therefore still not laid out correctly.
+- **No lam-alef ligature.** The VT gave lam and alef a cell each and the renderer
+  draws one glyph per cell, so they come out as lam-initial plus alef-final
+  rather than the single ligature glyph a real shaper produces. The corpus
+  records this as `arabic-lam-alef`.
+- **Arabic block only.** The joining table covers U+0600..U+06FF. Syriac, N'Ko,
+  Mongolian, Adlam and Thaana join by the same mechanism and would fall out of
+  the same code, but their tables are not transcribed and nothing tests them.
+  Arabic Supplement and Extended-A are likewise out.
+- **Nothing for Devanagari or the other complex scripts.** They need reordering
+  inside a cluster, which the VT has already split across cells; joining forms
+  do not help.
+- **Letterforms are distorted.** Fitting each glyph's advance to its cell
+  stretches narrow forms and squeezes wide ones. Arabic in a monospace grid is
+  distorted by construction; this picks a specific distortion and applies it
+  consistently, and it is what makes the strokes meet.
+- **A run that changes colour mid-word is split.** Each part joins and reverses
+  on its own, so a word with a colour change in the middle comes out in two
+  pieces. Grouping on colour is deliberate: reversing across a colour boundary
+  would carry characters into cells painted the other colour.
+
+Costs are measured in [benchmarks.md](benchmarks.md). Nothing changes when no
+shaper is configured, which is the default: the run-grouping pass is not
+constructed and the render path is what it always was.
+
+xterm.js does not do contextual shaping at all, so this is now a small edge
+rather than parity. It is not a reason to pick vtgl if you need real bidi, which
+neither has.
 
 ### Ligatures, selection, subpixel antialiasing
 
-None are implemented. Ligatures need the same run grouping shaping needs.
-Selection is a host concern: `Theme.selection` is declared and no backend reads
-it, so a host that wants selection draws its own overlay. Subpixel antialiasing
-would need foreground baked into the glyph, which is why `atlasKeyBaked` and
-`quantize` exist; nothing calls them.
+None are implemented. Ligatures would now have the run grouping they need, but
+nothing produces them: a ligature is several cells collapsing into one glyph,
+and the renderer draws one glyph per cell. Selection is a host concern:
+`Theme.selection` is declared and no backend reads it, so a host that wants
+selection draws its own overlay. Subpixel antialiasing would need foreground
+baked into the glyph, which is why `atlasKeyBaked` and `quantize` exist; nothing
+calls them.
 
 ### Blink is implemented but untested
 
@@ -78,7 +138,6 @@ These are in the type surface and read by nothing:
 | --- | --- |
 | `Theme.selection` | declared; no backend draws selection |
 | `Theme.palette` | declared; the renderer resolves no palette indices |
-| `RendererOptions.shaper` | accepted; never called |
 | `VtSource.getMode` | declared; no backend queries a mode, including 2026 |
 | `CursorState.blink` | declared; neither backend reads it |
 | `bell` event | in the event map; never emitted |
@@ -177,7 +236,7 @@ cell. A renderer that needs real layout wants a text engine, not a terminal
 renderer.
 
 It is not proven on real hardware or in production. The correctness properties
-are asserted by 100 unit tests and 16 browser tests, and the performance
+are asserted by 122 unit tests and 21 browser tests, and the performance
 properties are measured under software rasterization. What has not happened is
 burn-in on a real GPU, at several device pixel ratios and grid sizes, with a
 display attached. Until that exists, treat the GPU-side cost as unmeasured.

@@ -130,6 +130,51 @@ all cache hits. Foreground colour is tinted per instance rather than baked into
 the key, so the colored dump (24-bit SGR on every cell) causes no atlas traffic
 at all. The `dump` row confirms this directly.
 
+## Contextual shaping
+
+`npm run bench:browser` reports this as "contextual shaping cost". It measures
+the same scenario twice back to back, once with `arabicShaper()` configured and
+once without, five interleaved rounds, and reports the median of the per-round
+ratios. Interleaving is not optional here: absolute timings on this machine
+drift by a factor of two over the minutes a run takes, so an off-run and an
+on-run measured apart are not comparable. Only the paired ratio is.
+
+| scenario | backend | shaper off | shaper on | median ratio |
+| --- | --- | --- | --- | --- |
+| ascii | webgl2 | 2.05 ms | 2.28 ms | 1.03x |
+| ascii | canvas2d | 11.15 ms | 10.72 ms | 0.96x |
+| arabic | webgl2 | 2.36 ms | 4.52 ms | 1.98x |
+| arabic | canvas2d | 4.17 ms | 12.34 ms | 2.96x |
+| dump | webgl2 | 1.43 ms | 1.65 ms | 0.91x |
+| dump | canvas2d | 6.15 ms | 5.38 ms | 1.14x |
+
+Two results, and the difference between them is the point.
+
+**On content with no Arabic in it, the cost is not measurable.** The `ascii` and
+`dump` ratios straddle 1.0 and their individual rounds scatter from 0.69x to
+2.06x, so the noise floor on this machine is around 35%. The honest reading is
+"below the noise", not "zero": what the shaper adds on those rows is a code
+point range compare per cell on each dirty row, and the compare rejects before
+anything else is touched. It is not free, it is just smaller than this
+environment can see.
+
+**On an all-Arabic screen it roughly doubles WebGL2 and triples Canvas2D.** The
+`arabic` scenario is deliberately the worst case: 120x40 with one Arabic letter
+per cell, so nearly every cell belongs to a run that has to be grouped, shaped
+and reordered every dirty row. Those ratios are consistent across all five
+rounds (1.70x to 2.14x, and 2.08x to 3.36x), well clear of the noise.
+
+Canvas2D costs more than WebGL2 for a structural reason. The WebGL path rasters
+each shaped form once into the atlas and every later frame is a cache hit, so
+what it pays per frame is the grouping and the shaping decision. Canvas2D has no
+glyph cache, so it also re-runs a save, a scale and a fillText per shaped cell
+every frame. Advance measurement is memoised per cluster and font, which is what
+keeps that figure from being worse still.
+
+This is why the shaper is opt-in rather than on by default. A host that renders
+Arabic can pay it; a host that does not should not have to reason about whether
+it is paying it.
+
 ## What would change on real hardware
 
 The CPU column stays roughly as measured, because it is grid-walking and buffer

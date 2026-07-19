@@ -9,8 +9,15 @@ import { createRenderer, supportsWebGL2 } from '../src/index.ts';
 import { FakeSource } from '../src/testing/fake-source.ts';
 import { allScenarios, scenarioByName } from '../src/testing/scenarios.ts';
 import { buildTortureSource, tortureCorpus } from '../src/testing/torture.ts';
+import { arabicShaper } from '../src/shaper/arabic.ts';
 import { CellFlags } from '../src/types.ts';
-import type { Renderer, RendererOptions, RenderStats, Theme } from '../src/types.ts';
+import type {
+  Renderer,
+  RendererOptions,
+  RenderStats,
+  ShaperHook,
+  Theme,
+} from '../src/types.ts';
 
 const THEME: Theme = { foreground: 0xd0d0d0, background: 0x101010, cursor: 0xffffff };
 
@@ -63,12 +70,51 @@ interface Harness {
   /** Per-entry pixel diff, so divergence can be attributed to a cluster. */
   compareTortureRows(threshold: number): TortureRowDiff[];
   /** Per-entry ink coverage, so an unrendered or clipped cluster is visible. */
-  tortureInk(backend: 'webgl2' | 'canvas2d'): TortureInk[];
+  tortureInk(backend: 'webgl2' | 'canvas2d', shaped?: boolean): TortureInk[];
+  /**
+   * Per-column ink profile of one corpus row. Joining changes where the ink sits
+   * across a word's cells, which a single per-row total cannot see, so this is
+   * what the Arabic before/after is actually asserted on.
+   */
+  tortureColumnInk(
+    name: string,
+    backend: 'webgl2' | 'canvas2d',
+    shaped: boolean,
+  ): number[];
+  /** Whole-corpus pixel diff between shaped and unshaped, per row. */
+  shapingRowDiff(backend: 'webgl2' | 'canvas2d'): TortureRowDiff[];
+  /**
+   * Ground-truth check on the contextual forms.
+   *
+   * Unicode encodes the four Arabic joining forms explicitly in Presentation
+   * Forms-B (U+FE70..U+FEFF), so "did the shaper pick the right glyph, and put
+   * it in the right column" can be asked against a reference rather than by eye.
+   * This renders the word twice through the same renderer: once as the plain
+   * letters with the Arabic shaper, and once as the expected presentation forms
+   * in the expected visual order with a shaper that only fits advances. If
+   * joining and reordering are both right the two rows agree.
+   *
+   * `plain` renders the same reference against the unshaped letters, which is
+   * the before half of the comparison.
+   */
+  arabicFormCheck(backend: 'webgl2' | 'canvas2d'): {
+    shaped: number;
+    plain: number;
+    total: number;
+  };
+  /** The same three rows as PNG data URLs, for eyeballing them. */
+  arabicFormImages(backend: 'webgl2' | 'canvas2d'): string[];
+  /** The corpus as a PNG data URL, for eyeballing the rendered output. */
+  torturePng(backend: 'webgl2' | 'canvas2d', shaped: boolean): string;
+  /** Row index and cell height of the corpus, so a caller can crop one entry. */
+  tortureGeometry(): { index: Record<string, number>; cellHeight: number; cellWidth: number };
   bench(
     name: string,
     backend: 'webgl2' | 'canvas2d',
     frames: number,
     mode?: BenchMode,
+    /** Configure the Arabic shaper, so its cost can be measured against not having it. */
+    shaped?: boolean,
   ): BenchResult;
 }
 
@@ -164,6 +210,71 @@ function waitForEvent(target: EventTarget, type: string, ms: number): Promise<bo
     };
     target.addEventListener(type, onEvent, { once: true });
   });
+}
+
+/**
+ * Test-only shaper for the Presentation Forms-B block. It picks no forms and
+ * reorders nothing; it only asks for the same advance fitting the Arabic shaper
+ * applies, so a reference row of explicit presentation forms goes through the
+ * identical raster path and the comparison isolates glyph choice and column.
+ */
+function fitOnlyShaper(): ShaperHook {
+  return {
+    participates: (cp) => cp >= 0xfe70 && cp <= 0xfeff,
+    shapeRun(cells) {
+      return {
+        glyphs: cells.map((cluster, i) => ({
+          atlasKey: 'pf' + cluster,
+          cluster,
+          col: i,
+          xOffset: 0,
+          rtl: false,
+          fitAdvance: true,
+        })),
+      };
+    },
+  };
+}
+
+/**
+ * The three rows the Arabic ground-truth comparison rests on, rendered through
+ * the real renderer at identical metrics: the expected presentation forms, the
+ * plain letters with the Arabic shaper, and the plain letters with no shaper.
+ */
+function arabicFormRows(backend: 'webgl2' | 'canvas2d'): ImageData[] {
+  const WORD = 'سلام';
+  // salaam in Presentation Forms-B, already in the visual order a correct
+  // right-to-left layout produces: meem isolated, alef final, lam medial, seen
+  // initial. Alef is right-joining, which is why the meem beside it is isolated
+  // rather than final.
+  const FORMS = ['ﻡ', 'ﺎ', 'ﻠ', 'ﺳ'];
+  const cols = WORD.length;
+
+  const render = (chars: string[], shaper: RendererOptions['shaper']): ImageData => {
+    const src = new FakeSource({ cols, rows: 1, fg: 0xd0d0d0, bg: 0x101010 });
+    src.setCursor({ visible: false });
+    src.clearRegion(0, 1);
+    chars.forEach((ch, i) => src.setCell(0, i, ch.codePointAt(0)!, { width: 1 }));
+    const r = build(backend, shaper ? { ...BASE_OPTIONS, shaper } : BASE_OPTIONS);
+    const canvas = makeCanvas(8, 8);
+    r.mount(canvas);
+    r.resize(cols, 1, 1);
+    r.render(src, 0);
+    // Read back before disposing: the WebGL drawing buffer only survives until
+    // the next composite, so every probe here reads eagerly.
+    const px = readPixels(canvas);
+    r.dispose();
+    return px;
+  };
+
+  return [
+    // The reference goes through the same advance fitting the Arabic shaper
+    // applies, so the comparison isolates glyph choice and column rather than
+    // the fitting itself.
+    render(FORMS, fitOnlyShaper()),
+    render([...WORD], arabicShaper()),
+    render([...WORD], undefined),
+  ];
 }
 
 function makeCanvas(w: number, h: number): HTMLCanvasElement {
@@ -262,14 +373,24 @@ function diff(a: ImageData, b: ImageData, threshold: number): DiffResult {
   };
 }
 
-/** Render the whole torture corpus, one entry per row, on a fresh canvas. */
-function renderTorture(backend: 'webgl2' | 'canvas2d'): {
+/**
+ * Render the whole torture corpus, one entry per row, on a fresh canvas.
+ * `shaped` opts the renderer into the Arabic shaper, which is what the
+ * before/after evidence for contextual joining compares.
+ */
+function renderTorture(
+  backend: 'webgl2' | 'canvas2d',
+  shaped = false,
+): {
   canvas: HTMLCanvasElement;
   renderer: Renderer;
   metrics: { cellWidth: number; cellHeight: number };
 } {
   const source = buildTortureSource();
-  const renderer = build(backend);
+  const renderer = build(
+    backend,
+    shaped ? { ...BASE_OPTIONS, shaper: arabicShaper() } : BASE_OPTIONS,
+  );
   const canvas = makeCanvas(8, 8);
   renderer.mount(canvas);
   renderer.resize(source.cols, source.rows, 1);
@@ -595,8 +716,8 @@ const harness: Harness = {
     return out;
   },
 
-  tortureInk(backend) {
-    const { canvas, renderer, metrics } = renderTorture(backend);
+  tortureInk(backend, shaped = false) {
+    const { canvas, renderer, metrics } = renderTorture(backend, shaped);
     const px = readPixels(canvas);
     const out: TortureInk[] = [];
     tortureCorpus.forEach((entry, row) => {
@@ -613,11 +734,110 @@ const harness: Harness = {
     return out;
   },
 
-  bench(name, backend, frames, mode = 'full') {
+  tortureColumnInk(name, backend, shaped) {
+    const entry = tortureCorpus.find((e) => e.name === name);
+    if (!entry) throw new Error('unknown corpus entry: ' + name);
+    const row = tortureCorpus.indexOf(entry);
+    const { canvas, renderer, metrics } = renderTorture(backend, shaped);
+    const px = readPixels(canvas);
+    const out: number[] = [];
+    for (let col = 0; col < entry.columns; col++) {
+      out.push(inkIn(px, metrics, row, col, 1));
+    }
+    renderer.dispose();
+    return out;
+  },
+
+  shapingRowDiff(backend) {
+    const plain = renderTorture(backend, false);
+    const plainPx = readPixels(plain.canvas);
+    const shaped = renderTorture(backend, true);
+    const shapedPx = readPixels(shaped.canvas);
+    const h = plain.metrics.cellHeight;
+    const out: TortureRowDiff[] = tortureCorpus.map((entry, row) => {
+      const y0 = Math.round(row * h);
+      const y1 = Math.min(plainPx.height, Math.round((row + 1) * h));
+      let differing = 0;
+      let maxChannelDelta = 0;
+      let total = 0;
+      for (let y = y0; y < y1; y++) {
+        for (let x = 0; x < plainPx.width; x++) {
+          const i = (y * plainPx.width + x) * 4;
+          const d = Math.max(
+            Math.abs(plainPx.data[i] - shapedPx.data[i]),
+            Math.abs(plainPx.data[i + 1] - shapedPx.data[i + 1]),
+            Math.abs(plainPx.data[i + 2] - shapedPx.data[i + 2]),
+          );
+          if (d > maxChannelDelta) maxChannelDelta = d;
+          if (d > 40) differing++;
+          total++;
+        }
+      }
+      return { name: entry.name, fraction: total === 0 ? 0 : differing / total, maxChannelDelta };
+    });
+    plain.renderer.dispose();
+    shaped.renderer.dispose();
+    return out;
+  },
+
+  torturePng(backend, shaped) {
+    const { canvas, renderer } = renderTorture(backend, shaped);
+    const scratch = document.createElement('canvas');
+    scratch.width = canvas.width;
+    scratch.height = canvas.height;
+    scratch.getContext('2d')!.drawImage(canvas, 0, 0);
+    const url = scratch.toDataURL('image/png');
+    renderer.dispose();
+    return url;
+  },
+
+  arabicFormImages(backend) {
+    return arabicFormRows(backend).map((px) => {
+      const s = document.createElement('canvas');
+      s.width = px.width;
+      s.height = px.height;
+      s.getContext('2d')!.putImageData(px, 0, 0);
+      return s.toDataURL('image/png');
+    });
+  },
+
+  arabicFormCheck(backend) {
+    const [reference, shaped, plain] = arabicFormRows(backend);
+    const differing = (a: ImageData, b: ImageData): number => {
+      let n = 0;
+      for (let i = 0; i < a.data.length; i += 4) {
+        const d = Math.max(
+          Math.abs(a.data[i] - b.data[i]),
+          Math.abs(a.data[i + 1] - b.data[i + 1]),
+          Math.abs(a.data[i + 2] - b.data[i + 2]),
+        );
+        if (d > 40) n++;
+      }
+      return n;
+    };
+    return {
+      shaped: differing(shaped, reference),
+      plain: differing(plain, reference),
+      total: reference.width * reference.height,
+    };
+  },
+
+  tortureGeometry() {
+    const { renderer, metrics } = renderTorture('canvas2d', false);
+    renderer.dispose();
+    const index: Record<string, number> = {};
+    tortureCorpus.forEach((e, i) => (index[e.name] = i));
+    return { index, cellHeight: metrics.cellHeight, cellWidth: metrics.cellWidth };
+  },
+
+  bench(name, backend, frames, mode = 'full', shaped = false) {
     const sc = scenarioByName(name);
     if (!sc) throw new Error('unknown scenario: ' + name);
     const source = sc.build();
-    const renderer = build(backend);
+    const renderer = build(
+      backend,
+      shaped ? { ...BASE_OPTIONS, shaper: arabicShaper() } : BASE_OPTIONS,
+    );
     const canvas = makeCanvas(8, 8);
     renderer.mount(canvas);
     renderer.resize(sc.cols, sc.rows, 1);

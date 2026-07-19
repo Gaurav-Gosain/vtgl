@@ -36,9 +36,11 @@ repository and parsed for SGR.
   </tr>
 </table>
 
-The Arabic rows are the honest failure: vtgl ships no shaper, so each letter
-draws in its isolated form rather than joining. That and the rest of the known
-gaps are in [docs/limits.md](docs/limits.md).
+The Arabic rows were the honest failure, and are now the opt-in case: with
+`shaper: arabicShaper()` the letters take their contextual forms and the run is
+laid out right to left, so a word joins. Reordering is the reason it is opt-in,
+and bidi beyond one run of one line is still not done. That and the rest of the
+known gaps are in [docs/limits.md](docs/limits.md).
 
 Regenerate the three with `npm run capture`, and the banner with
 `node scripts/banner/make-banner.mjs scripts/banner/configs/vtgl.json -o docs/images/banner.png`.
@@ -59,7 +61,7 @@ Regenerate the three with `npm run capture`, and the banner with
 - Maps CSS pixels to cells and back for hit testing, and emits a `cursorMove` event when the cursor's absolute position or shape changes.
 - Reports per-frame `RenderStats` (dirty rows, glyph instances, draw calls, atlas uploads, whether the frame was full, and CPU milliseconds inside `render()`), which is what the benchmark suite measures.
 - Applies faint as an alpha scale and blink as a 500 ms gate in the glyph fragment shader; both are per-instance style bits, so neither enters the atlas key.
-- Ships a scriptable `FakeSource`, nine golden scenarios, and a 24-entry Unicode grapheme torture corpus, so the renderer can be tested and benchmarked with no VT wired up.
+- Ships a scriptable `FakeSource`, ten golden scenarios, and a 24-entry Unicode grapheme torture corpus, so the renderer can be tested and benchmarked with no VT wired up.
 
 ## Design goals
 
@@ -303,9 +305,25 @@ interface Renderer {
 }
 ```
 
-`RendererOptions` takes `fontFamily`, `fontSize`, optional `lineHeight` (default 1.2), `letterSpacing`, `dpr`, a `theme`, `resolveInverse`, and an optional `shaper` that is accepted and currently ignored. `getMetrics()` reports device-pixel and CSS-pixel cell sizes, the baseline offset, the backing-store size, and the resolved font settings, which is what a host needs to keep its own geometry in sync. Events are `render` (a `RenderStats`) and `cursorMove` (a `CellCoord` carrying an absolute row); `bell` is declared in the event map and never emitted, because the renderer has no VT event stream to raise it from.
+`RendererOptions` takes `fontFamily`, `fontSize`, optional `lineHeight` (default 1.2), `letterSpacing`, `dpr`, a `theme`, `resolveInverse`, and an optional `shaper` (see `arabicShaper()`), honoured by both backends and absent by default. `getMetrics()` reports device-pixel and CSS-pixel cell sizes, the baseline offset, the backing-store size, and the resolved font settings, which is what a host needs to keep its own geometry in sync. Events are `render` (a `RenderStats`) and `cursorMove` (a `CellCoord` carrying an absolute row); `bell` is declared in the event map and never emitted, because the renderer has no VT event stream to raise it from.
 
-Also exported: `supportsWebGL2()`, `RenderScheduler`, `computeCellMetrics`, `measureFont`, `GlyphAtlas`, `AtlasPacker`, `ShelfAllocator`, `atlasKey`, `atlasKeyBaked`, `styleMask`, `InstanceBuffers`, `StyleBit`, the color helpers (`rgb`, `toCss`, `quantize`), and `Emitter`. [docs/extending.md](docs/extending.md) covers which of these are seams and what each costs to replace.
+Arabic joining is off unless you ask for it:
+
+```ts
+import { createRenderer, arabicShaper } from 'vtgl';
+
+const renderer = createRenderer({
+  fontFamily: 'monospace',
+  fontSize: 14,
+  theme,
+  // Joins Arabic and lays each run out right to left. That reordering means a
+  // cell's index and the column its character is drawn in stop agreeing inside
+  // a shaped run, so leave this off if hit testing has to match the buffer.
+  shaper: arabicShaper(),
+});
+```
+
+Also exported: `supportsWebGL2()`, `arabicShaper`, `RowShaper`, `RenderScheduler`, `computeCellMetrics`, `measureFont`, `GlyphAtlas`, `AtlasPacker`, `ShelfAllocator`, `atlasKey`, `atlasKeyBaked`, `styleMask`, `InstanceBuffers`, `StyleBit`, the color helpers (`rgb`, `toCss`, `quantize`), and `Emitter`. [docs/extending.md](docs/extending.md) covers which of these are seams and what each costs to replace.
 
 ## Performance
 
@@ -331,22 +349,22 @@ Blank and tui are the two cases Canvas2D wins or ties. Both are nearly empty scr
 
 The full list, with the reasoning and the memory ceilings, is [docs/limits.md](docs/limits.md). The ones that decide whether vtgl fits:
 
-- **No contextual shaping.** Arabic joining is wrong. A grapheme-aware VT puts one Arabic letter per cell (the torture corpus records this as the `split` layout, measured against ghostty-vt rather than assumed), and vtgl draws each in isolated form, so a word does not join. The `ShaperHook` interface is defined and the atlas keys by string specifically so shaped runs can slot into the same cache, but no shaper is written and the `shaper` option is ignored by both backends. xterm.js does not do contextual shaping either, so this is not a gap relative to the obvious alternative.
+- **Contextual shaping is opt-in, Arabic only, and is not bidi.** `shaper: arabicShaper()` makes Arabic join: both backends group contiguous Arabic cells into a run, ask the browser for each letter's contextual form via a joining context, lay the run out right to left, and fit each glyph's advance to its cell so the strokes meet. Verified against the Unicode presentation forms, which the shaped output matches to 10 pixels in 736 where the unshaped output is 176 away. What it is not: it is not the Unicode Bidirectional Algorithm, word order across a space is not reversed, there is no lam-alef ligature, and only U+0600..U+06FF is covered. It is off by default because reversing a run breaks the identity between a cell's index and the column its character is drawn in, so `cellAtPixel` inside a shaped run names a cell whose character sits elsewhere in that run. Cost is unmeasurable on content with no Arabic and roughly 2x (WebGL2) to 3x (Canvas2D) of render CPU on an all-Arabic screen.
 - **Scrolling repaints in full.** Moving the viewport rebuilds and re-uploads every row even though no cell changed. The `scrollstorm` benchmark shows 40 dirty rows at natural damage with nothing written. Shifting instance data by the scroll delta would make a one-line scroll cost about what a one-line edit costs; that is the largest remaining optimisation.
 - **A DPR change rebuilds rather than rescales.** Cell geometry drove the atlas slot sizes, so `resize()` with a new device pixel ratio throws the whole atlas away and re-rasters every glyph over the following frames.
 - **Blink is implemented but untested, and needs a driver.** The glyph shader gates alpha on a 500 ms `u_time` phase, but no scenario or test sets `CellFlags.BLINK`, the Canvas2D fallback ignores it entirely, and the renderer runs no clock, so a blinking cell only visibly toggles if something keeps requesting frames. Cursor blink is not implemented at all: `CursorState.blink` is in the contract and neither backend reads it.
 - **Benchmarks were measured under software rasterization.** Only the CPU-side figures, the draw-call counts, and the allocation numbers transfer to real hardware. See [docs/benchmarks.md](docs/benchmarks.md).
-- **Pixel parity is a tolerance, over part of the corpus.** Four golden scenarios are compared under a 2% differing-pixel budget and the emoji scenario under 5%, not all nine and not pixel-exact. The 24-entry torture corpus is compared by ink coverage per cell rather than per pixel, because those rows are mostly background and a subpixel shift swings the differing-pixel fraction while nothing is wrong.
+- **Pixel parity is a tolerance, over part of the corpus.** Four golden scenarios are compared under a 2% differing-pixel budget and the emoji scenario under 5%, not all ten and not pixel-exact. The 24-entry torture corpus is compared by ink coverage per cell rather than per pixel, because those rows are mostly background and a subpixel shift swings the differing-pixel fraction while nothing is wrong.
 - **Wide glyphs are clipped, not bled.** A glyph whose font advance exceeds the cells the VT assigned it is clipped by its atlas slot, where Canvas2D lets it paint outside. Measured on the torture corpus, Canvas2D bleeds into the next cell on 9 of 24 entries and the WebGL2 path on none. Both behaviours are defensible; the tests record each rather than pretending they match.
-- **Several contract fields are declared and inert.** `Theme.selection`, `Theme.palette`, `RendererOptions.shaper`, `VtSource.getMode`, `CursorState.blink`, and the `bell` event are part of the types and are not read or emitted by either backend. `atlasKeyBaked` and `quantize` are exported for a baked foreground-quantized atlas mode that is not implemented.
-- **No selection overlays, ligatures, or subpixel antialiasing.** A host that wants selection draws it itself.
+- **Several contract fields are declared and inert.** `Theme.selection`, `Theme.palette`, `VtSource.getMode`, `CursorState.blink`, and the `bell` event are part of the types and are not read or emitted by either backend. `atlasKeyBaked` and `quantize` are exported for a baked foreground-quantized atlas mode that is not implemented.
+- **No selection overlays, ligatures, or subpixel antialiasing.** A ligature is several cells collapsing into one glyph, and the renderer draws one glyph per cell, so run grouping alone does not get there. A host that wants selection draws it itself.
 
 ## Tests
 
 ```
 npm run typecheck
-npm run test          # 100 unit tests under node:test
-npm run test:browser  # 16 Playwright tests against the system chromium
+npm run test          # 122 unit tests under node:test
+npm run test:browser  # 21 Playwright tests against the system chromium
 npm run build
 npm run check         # all of the above, in order
 ```

@@ -1,8 +1,8 @@
 # Architecture
 
 This document describes what the code does today. Where a decision was made for
-a capability that has not landed (contextual shaping, a baked-foreground atlas
-mode), that is said explicitly rather than described in the present tense.
+a capability that has not landed (a baked-foreground atlas mode), that is said
+explicitly rather than described in the present tense.
 
 ## Package layout
 
@@ -21,14 +21,17 @@ flowchart LR
   MET --> C2D
   SCH[src/renderer/scheduler.ts<br/>frame coalescing] --> GL
   SCH --> C2D
+  ARA[src/shaper/arabic.ts<br/>Arabic joining table] --> RUN[src/renderer/runs.ts<br/>per-row run grouping]
+  RUN --> INST
+  RUN --> C2D
 ```
 
 Only two modules import WebGL types: `renderer/webgl2.ts` and
 `atlas/glyph-atlas.ts` (plus `gl/program.ts`, which is a helper for both).
-Everything else is pure enough to run under `node --test`, which is why 100 unit
+Everything else is pure enough to run under `node --test`, which is why 122 unit
 tests cover the shelf allocator, the packer, key generation, cell metrics, the
-scheduler, the instance builder, and the Canvas2D renderer with no GPU in the
-process.
+scheduler, the instance builder, the run grouping, the Arabic shaper, and the
+Canvas2D renderer with no GPU in the process.
 
 `src/types.ts` carries no logic. It is the file to read first, and the file a
 host reads to write an adapter.
@@ -59,8 +62,10 @@ A blank cell is codepoint 0 or 32.
 
 The atlas is a cache from a rasterizable-glyph identity to a rectangle in a
 texture page. The identity is a string. Keying by string is the load-bearing
-decision: it is what would let a contextual shaper mint per-shaped-glyph keys
-that slot into the same atlas the per-grapheme path uses.
+decision: it is what lets a contextual shaper mint per-shaped-glyph keys that
+slot into the same atlas the per-grapheme path uses. `arabicShaper` does exactly
+that, in its own key namespace so a fitted raster cannot displace the plain
+entry for the same letter.
 
 Default, tinting mode (`atlasKey`):
 
@@ -138,8 +143,8 @@ live in preallocated typed arrays sized `cols * rows`, reused frame to frame:
 
 The background pass derives its cell from `gl_InstanceID` and `u_cols`, so the
 only per-instance datum is the color. The glyph pass does the same and adds the
-atlas rect, a device-pixel offset within the cell (reserved for shaper output and
-currently always zero), the packed foreground, and a style word: bit 0 colored,
+atlas rect, a device-pixel offset within the cell (zero on the default path,
+written from a shaped glyph's `xOffset` otherwise), the packed foreground, and a style word: bit 0 colored,
 bit 1 faint, bit 2 blink, bits 8 to 15 the atlas page. Decorations are two
 instances per cell, underline and strikethrough, drawn by a solid-rect program
 shared with the cursor.
@@ -311,6 +316,7 @@ contradicted the obvious guess: a Devanagari consonant plus dependent vowel is a
 width-2 cluster rather than one column, and the ksha conjunct stays a single
 cluster rather than splitting per scalar. Arabic is the one family the VT does
 split per cell, which is why joining needs a shaper working across cells rather
-than a wider atlas slot. The corpus asserts two different things:
+than a wider atlas slot; `arabicShaper` is that shaper, and it is opt-in because
+it also reorders those cells. The corpus asserts two different things:
 that a host adapter agrees with a real VT's segmentation, and that both backends
 draw every cluster with comparable ink in the cells the VT assigned it.
