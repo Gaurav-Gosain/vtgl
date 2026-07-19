@@ -17,6 +17,7 @@ import { Emitter } from '../events.ts';
 import { toCss } from '../color.ts';
 import { computeCellMetrics, measureFont } from './metrics.ts';
 import { RenderScheduler } from './scheduler.ts';
+import { RowShaper } from './runs.ts';
 import type {
   CellCoord,
   CursorState,
@@ -38,6 +39,7 @@ type Ctx2D = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
 const DEFAULT_LINE_HEIGHT = 1.2;
 const FONT_CACHE_LIMIT = 8;
 const FILL_CACHE_LIMIT = 512;
+const ADVANCE_CACHE_LIMIT = 512;
 
 export class Canvas2DRenderer implements Renderer {
   readonly backend: RendererBackend = 'canvas2d';
@@ -63,6 +65,10 @@ export class Canvas2DRenderer implements Renderer {
   private scheduler: RenderScheduler | null = null;
   private pendingFrame: { source: VtSource; viewportY: number } | null = null;
 
+  // Only constructed when a shaper is configured, so the default path never
+  // pays for the per-row grouping pass or its buffers.
+  private readonly rowShaper: RowShaper | null;
+
   private forceFull = true;
   private lastCursorKey = -1;
   // Viewport row drawn at the top of the last frame. Scrolling changes which
@@ -82,6 +88,7 @@ export class Canvas2DRenderer implements Renderer {
 
   private readonly fontCache = new Map<number, string>();
   private readonly fillCache = new Map<number, string>();
+  private readonly advanceCache = new Map<string, number>();
 
   constructor(options: RendererOptions) {
     this.opts = {
@@ -94,6 +101,7 @@ export class Canvas2DRenderer implements Renderer {
       letterSpacing: options.letterSpacing,
       shaper: options.shaper,
     };
+    this.rowShaper = options.shaper ? new RowShaper() : null;
     this.theme = options.theme;
     this.dpr = this.opts.dpr;
   }
@@ -131,6 +139,7 @@ export class Canvas2DRenderer implements Renderer {
     this.emitter.clear();
     this.fontCache.clear();
     this.fillCache.clear();
+    this.advanceCache.clear();
     this.ctx = null;
     this.canvas = null;
   }
@@ -251,6 +260,7 @@ export class Canvas2DRenderer implements Renderer {
   ): number {
     const y = vr * this.cellH;
     const defaultBg = this.theme.background;
+    const shaped = this.planRow(line);
 
     // On an incremental redraw the row was not cleared by the full-clear above,
     // so repaint its background band before drawing cells.
@@ -300,7 +310,11 @@ export class Canvas2DRenderer implements Renderer {
         blinking = true;
       }
 
-      const grapheme = line.grapheme(col);
+      // A shaped column draws the shaper's cluster, which under a reordering
+      // shaper came from another cell of the same run. Runs are uniform in
+      // style, so the colours and flags read above still apply.
+      const isShaped = shaped !== undefined && shaped.has(col);
+      const grapheme = isShaped ? shaped.cluster(col) : line.grapheme(col);
       if (grapheme.length === 0) continue;
 
       if (!blinking || blinkOn) {
@@ -308,7 +322,7 @@ export class Canvas2DRenderer implements Renderer {
         const alpha = flags & CellFlags.FAINT ? 0.5 : 1;
         if (alpha !== 1) ctx.globalAlpha = alpha;
         ctx.fillStyle = this.fill(fg);
-        ctx.fillText(grapheme, x, y + this.baseline);
+        this.fillGlyph(ctx, grapheme, x, y + this.baseline, shaped, isShaped ? col : -1);
         if (alpha !== 1) ctx.globalAlpha = 1;
         glyphs++;
       }
@@ -318,6 +332,52 @@ export class Canvas2DRenderer implements Renderer {
       }
     }
     return glyphs;
+  }
+
+  /**
+   * Shape one row, or undefined when there is no shaper or the row holds
+   * nothing the shaper wants.
+   */
+  private planRow(line: LineView): RowShaper | undefined {
+    const rs = this.rowShaper;
+    if (!rs) return undefined;
+    return rs.plan(line, this.cols, this.opts.shaper!) ? rs : undefined;
+  }
+
+  /**
+   * Draw one cluster. The unshaped path is a plain fillText, unchanged. The
+   * shaped path has to reproduce the decisions GlyphAtlas.raster makes, because
+   * the two backends are held to drawing the same picture: same RTL context,
+   * same advance fitted to the cell, same left-aligned origin.
+   */
+  private fillGlyph(
+    ctx: Ctx2D,
+    cluster: string,
+    x: number,
+    baselineY: number,
+    shaped: RowShaper | undefined,
+    col: number,
+  ): void {
+    if (col < 0 || shaped === undefined) {
+      ctx.fillText(cluster, x, baselineY);
+      return;
+    }
+    // Set on every shaped glyph and reset after, so a shaped cell cannot leak
+    // its direction into the next unshaped one on the same row.
+    ctx.textAlign = 'left';
+    ctx.direction = shaped.rtl(col) ? 'rtl' : 'ltr';
+    const dx = x + shaped.xOffset(col);
+    if (shaped.fitAdvance(col)) {
+      const advance = this.advanceOf(ctx, cluster);
+      ctx.save();
+      ctx.translate(dx, baselineY);
+      if (advance > 0) ctx.scale(this.cellW / advance, 1);
+      ctx.fillText(cluster, 0, 0);
+      ctx.restore();
+    } else {
+      ctx.fillText(cluster, dx, baselineY);
+    }
+    ctx.direction = 'ltr';
   }
 
   private drawDecorations(
@@ -369,11 +429,15 @@ export class Canvas2DRenderer implements Renderer {
       default: {
         ctx.fillRect(x, y, this.cellW, this.cellH);
         const line = source.getLine(cur.y);
-        const g = line.grapheme(cur.x);
+        // Overpaint whatever is drawn in this column, which under a reordering
+        // shaper is not the character the cursor's own cell holds.
+        const plan = this.planRow(line);
+        const shapedHere = plan !== undefined && plan.has(cur.x);
+        const g = shapedHere ? plan.cluster(cur.x) : line.grapheme(cur.x);
         if (g.length > 0 && line.codepoint(cur.x) !== 32) {
           ctx.font = this.font(line.flags(cur.x));
           ctx.fillStyle = this.fill(this.theme.cursorText ?? this.theme.background);
-          ctx.fillText(g, x, y + this.baseline);
+          this.fillGlyph(ctx, g, x, y + this.baseline, plan, shapedHere ? cur.x : -1);
         }
         break;
       }
@@ -454,6 +518,8 @@ export class Canvas2DRenderer implements Renderer {
     this.cellH = g.cellH;
     this.baseline = g.baseline;
     this.fontCache.clear();
+    // Advances are in device pixels, so a metrics change invalidates them.
+    this.advanceCache.clear();
   }
 
   private applyBackingStore(): void {
@@ -473,6 +539,24 @@ export class Canvas2DRenderer implements Renderer {
     if (this.fontCache.size >= FONT_CACHE_LIMIT) this.fontCache.clear();
     this.fontCache.set(mask, s);
     return s;
+  }
+
+  /**
+   * Advance of a shaped cluster in the current font and direction.
+   *
+   * This backend has no glyph cache, so without memoising, fitting would cost a
+   * measureText on every shaped cell on every frame; the WebGL path measures
+   * once and keeps the result in the atlas. Keyed by the font string as well as
+   * the cluster because the same letters measure differently bold.
+   */
+  private advanceOf(ctx: Ctx2D, cluster: string): number {
+    const key = ctx.font + '\u0001' + cluster;
+    const hit = this.advanceCache.get(key);
+    if (hit !== undefined) return hit;
+    const w = ctx.measureText(cluster).width;
+    if (this.advanceCache.size >= ADVANCE_CACHE_LIMIT) this.advanceCache.clear();
+    this.advanceCache.set(key, w);
+    return w;
   }
 
   private fill(color: Rgb): string {

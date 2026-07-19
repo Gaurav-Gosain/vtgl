@@ -20,6 +20,7 @@
 
 import { CellFlags } from '../types.ts';
 import { styleMask } from '../atlas/key.ts';
+import type { RowShaper } from './runs.ts';
 import type { Theme, VtSource } from '../types.ts';
 
 /** A packed slot in the atlas, as returned by a GlyphProvider. */
@@ -33,12 +34,30 @@ export interface AtlasRect {
 }
 
 /**
+ * How to raster a shaped glyph, supplied by a ShaperHook. Absent (the default
+ * path), the atlas keys by grapheme and rasters exactly as it always has.
+ */
+export interface RasterHint {
+  /** Atlas key minted by the shaper, used in place of the grapheme-derived one. */
+  key: string;
+  /** Raster in a right-to-left context, which is what makes a trailing ZWJ count. */
+  rtl: boolean;
+  /** Scale horizontally so the cluster's advance equals the slot width. */
+  fitAdvance: boolean;
+}
+
+/**
  * Minimal glyph-supply surface the builder needs. The GL atlas implements this
  * (raster+upload on miss); tests pass a fake that hands back deterministic
  * rects. Returns null if the glyph could not be placed.
  */
 export interface GlyphProvider {
-  ensure(grapheme: string, styleMask: number, widthCols: number): AtlasRect | null;
+  ensure(
+    grapheme: string,
+    styleMask: number,
+    widthCols: number,
+    hint?: RasterHint,
+  ): AtlasRect | null;
 }
 
 export const StyleBit = {
@@ -164,6 +183,7 @@ export class InstanceBuffers {
     absRow: number,
     slot: number,
     provider: GlyphProvider,
+    shaped?: RowShaper,
   ): RowBuildResult {
     const line = source.getLine(absRow);
     const cols = this.cols;
@@ -207,10 +227,19 @@ export class InstanceBuffers {
       const blank = cp === 0 || cp === 32;
       if (blank || flags & CellFlags.INVISIBLE) continue;
 
-      const grapheme = line.grapheme(col);
+      // A shaped column draws the shaper's cluster under the shaper's key. The
+      // cell it came from may be elsewhere in the run, but a run is uniform in
+      // style, so the colours and flags read above still apply here.
+      const isShaped = shaped !== undefined && shaped.has(col);
+      const grapheme = isShaped ? shaped.cluster(col) : line.grapheme(col);
       if (grapheme.length === 0) continue;
 
-      const rect = provider.ensure(grapheme, styleMask(flags), spanCols);
+      const rect = provider.ensure(
+        grapheme,
+        styleMask(flags),
+        spanCols,
+        isShaped ? shaped.hintFor(col) : undefined,
+      );
       if (rect === null) continue; // could not place; drawn as blank this frame
 
       const x = col * this.cellW;
@@ -219,7 +248,7 @@ export class InstanceBuffers {
       this.glyphF32[gBase + 1] = rect.y;
       this.glyphF32[gBase + 2] = rect.w;
       this.glyphF32[gBase + 3] = rect.h;
-      this.glyphF32[gBase + 4] = 0; // glyphOff.x
+      this.glyphF32[gBase + 4] = isShaped ? shaped.xOffset(col) : 0; // glyphOff.x
       this.glyphF32[gBase + 5] = 0; // glyphOff.y
       this.glyphU32[gBase + 6] = fg & 0xffffff;
       let style = (rect.page & 0xff) << 8;

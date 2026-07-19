@@ -54,6 +54,35 @@ export const asciiScenario: Scenario = {
   },
 };
 
+/**
+ * Dense Arabic text, static. Written one letter per cell, which is the cell
+ * layout a grapheme-aware VT produces for Arabic (the torture corpus records it
+ * as the `split` layout). This is the worst case for the contextual shaper:
+ * almost every cell belongs to a run that has to be grouped, shaped and
+ * reordered, so it is what the shaping cost is measured against.
+ */
+export const arabicScenario: Scenario = {
+  name: 'arabic',
+  damage: 'static',
+  description: 'Dense Arabic, one letter per cell, 120x40, static after first paint.',
+  cols: COLS,
+  rows: ROWS,
+  build() {
+    const s = new FakeSource({ cols: COLS, rows: ROWS, fg: FG, bg: BG });
+    const line = 'السلام عليكم ورحمة الله وبركاته مرحبا بكم في هذا النص العربي الطويل';
+    for (let r = 0; r < ROWS; r++) {
+      // One cell per scalar rather than writeText's grapheme segmentation, so
+      // the grid matches what a real VT hands the renderer for Arabic.
+      const chars = [...line];
+      for (let c = 0; c < COLS; c++) {
+        const ch = chars[c % chars.length];
+        s.setCell(s.activeTop + r, c, ch.codePointAt(0)!, { width: 1, fg: FG, bg: BG });
+      }
+    }
+    return s;
+  },
+};
+
 /** Mixed CJK (wide) and ASCII, exercising width-2 heads and width-0 tails. */
 export const cjkScenario: Scenario = {
   name: 'cjk',
@@ -378,6 +407,7 @@ export const scenarios: Scenario[] = [
   asciiScenario,
   cjkScenario,
   emojiScenario,
+  arabicScenario,
   blankScenario,
   churnScenario,
 ];

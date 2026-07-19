@@ -140,7 +140,7 @@ interface RendererOptions {
   dpr?: number;            // default devicePixelRatio, or 1
   theme: Theme;
   resolveInverse?: boolean;  // default false
-  shaper?: ShaperHook;       // accepted and currently ignored
+  shaper?: ShaperHook;       // honoured by both backends; absent by default
 }
 ```
 
@@ -268,23 +268,39 @@ included on either backend.
 interface RunStyle { bold: boolean; italic: boolean; }
 
 interface ShapedGlyph {
-  atlasKey: string;  // stable per-glyph key, e.g. `${fontId}:${glyphId}`
-  cluster: string;   // the contextual form to raster
-  col: number;       // column within the run this glyph advances from
-  xOffset: number;   // device-px offset from the run origin
+  atlasKey: string;    // stable per-glyph key; must vary with anything visible
+  cluster: string;     // the contextual form to raster
+  col: number;         // column within the run this glyph is drawn in
+  xOffset: number;     // device-px offset from that column's left edge
+  rtl: boolean;        // raster in a right-to-left context
+  fitAdvance: boolean; // scale so the advance equals the slot width
 }
 
 interface ShapedRun { glyphs: ShapedGlyph[]; }
-interface ShaperHook { shapeRun(text: string, style: RunStyle): ShapedRun; }
+
+interface ShaperHook {
+  participates(codepoint: number): boolean;
+  shapeRun(cells: readonly string[], style: RunStyle): ShapedRun;
+}
 ```
 
-This is a designed seam, not a working one. No backend calls `shapeRun`, and the
-`shaper` option is accepted and dropped. The pieces that exist for it are real:
-the atlas keys by string, so shaper-minted keys slot into the same cache, and
-the glyph instance already carries a device-pixel offset within the cell
-(`a_glyphOff`), currently always zero, so shaped placement needs no new pipeline
-state. What is missing is run grouping in the renderers and a shaper
-implementation.
+Both backends honour `RendererOptions.shaper`. They group contiguous cells that
+are width 1, accepted by `participates`, and identical in fg, bg and flags into a
+run, call `shapeRun`, and draw each returned glyph in `col` under its
+`atlasKey`. With no shaper configured nothing here runs and each cell is a
+length-1 run keyed by its grapheme, which is the default.
+
+`shapeRun` takes the run's cells rather than one concatenated string. A cell's
+grapheme may carry combining marks, so a flat string cannot be split back into
+the columns the renderer has to draw in.
+
+`col` is relative to the start of the run, and returning something other than
+the source cell's own index is how run-local reordering is expressed. A glyph
+placed outside its run is dropped rather than trusted.
+
+`arabicShaper()` is the shaper shipped. See [limits.md](limits.md) for exactly
+what it does and does not guarantee; the short version is joining forms and
+run-local right-to-left ordering for the Arabic block, and not bidi.
 
 ## Lower-level exports
 

@@ -19,7 +19,9 @@ export type { AtlasEntry, PackerStats } from './atlas/packer.ts';
 export { GlyphAtlas } from './atlas/glyph-atlas.ts';
 export type { RasterFont } from './atlas/glyph-atlas.ts';
 export { InstanceBuffers, StyleBit } from './renderer/instances.ts';
-export type { AtlasRect, GlyphProvider } from './renderer/instances.ts';
+export type { AtlasRect, GlyphProvider, RasterHint } from './renderer/instances.ts';
+export { RowShaper } from './renderer/runs.ts';
+export { arabicShaper, isArabic, joiningType } from './shaper/arabic.ts';
 
 import { Canvas2DRenderer } from './renderer/canvas2d.ts';
 import { WebGL2Renderer } from './renderer/webgl2.ts';

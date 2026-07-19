@@ -20,6 +20,7 @@ import { Emitter } from '../events.ts';
 import { computeCellMetrics, measureFont } from './metrics.ts';
 import { RenderScheduler } from './scheduler.ts';
 import { InstanceBuffers, GLYPH_UNITS, DECO_UNITS, DECO_PER_CELL } from './instances.ts';
+import { RowShaper } from './runs.ts';
 import { styleMask } from '../atlas/key.ts';
 import { GlyphAtlas } from '../atlas/glyph-atlas.ts';
 import type { RasterFont } from '../atlas/glyph-atlas.ts';
@@ -45,6 +46,7 @@ import type {
   RendererEventMap,
   RendererOptions,
   RenderStats,
+  ShaperHook,
   Theme,
   VtSource,
 } from '../types.ts';
@@ -71,7 +73,12 @@ export class WebGL2Renderer implements Renderer {
     letterSpacing: number;
     dpr: number;
     resolveInverse: boolean;
+    shaper?: ShaperHook;
   };
+
+  // Only constructed when a shaper is configured, so the default path never
+  // pays for the per-row grouping pass or its buffers.
+  private readonly rowShaper: RowShaper | null;
 
   private theme: Theme;
   private cols = 0;
@@ -162,7 +169,9 @@ export class WebGL2Renderer implements Renderer {
       letterSpacing: options.letterSpacing ?? 0,
       dpr: options.dpr ?? globalDpr(),
       resolveInverse: options.resolveInverse ?? false,
+      shaper: options.shaper,
     };
+    this.rowShaper = options.shaper ? new RowShaper() : null;
     this.theme = options.theme;
     this.dpr = this.opts.dpr;
   }
@@ -350,7 +359,13 @@ export class WebGL2Renderer implements Renderer {
         // inherit its background. Rebuilt dirty rows keep the old occupant's
         // colors in that one degenerate case, as they always have.
         if (exposed) this.buffers.clearSlotBg(slot, this.theme.background);
-        glyphs += this.buffers.buildRow(source, absRow, slot, atlas).glyphs;
+        glyphs += this.buffers.buildRow(
+          source,
+          absRow,
+          slot,
+          atlas,
+          this.planRow(source, absRow),
+        ).glyphs;
       }
 
       this.resolveCursor(source, viewportY);
@@ -370,6 +385,20 @@ export class WebGL2Renderer implements Renderer {
   private slotFor(vr: number): number {
     const s = vr + this.slotBase;
     return s >= this.rows ? s - this.rows : s;
+  }
+
+  /**
+   * Shape one row, or return undefined when there is no shaper or the row has
+   * nothing the shaper wants. Returning undefined rather than an empty plan lets
+   * the instance builder skip its per-column shaped-cell test entirely.
+   *
+   * The plan is per row and holds no screen position, so it is indifferent to
+   * which slot the row is being built into.
+   */
+  private planRow(source: VtSource, absRow: number): RowShaper | undefined {
+    const rs = this.rowShaper;
+    if (!rs) return undefined;
+    return rs.plan(source.getLine(absRow), this.cols, this.opts.shaper!) ? rs : undefined;
   }
 
   private resolveCursor(source: VtSource, viewportY: number): void {
@@ -393,10 +422,21 @@ export class WebGL2Renderer implements Renderer {
     const line = source.getLine(cur.y);
     const cp = line.codepoint(cur.x);
     if (cp === 0 || cp === 32) return;
-    const g = line.grapheme(cur.x);
+    // The cursor overpaints whatever is drawn in its column, which under a
+    // reordering shaper is not the character the cursor's own cell holds. Shape
+    // the row again here: buildFrame's plan is for the row it was building, and
+    // the cursor row may not have been dirty at all.
+    const plan = this.planRow(source, cur.y);
+    const shapedHere = plan !== undefined && plan.has(cur.x);
+    const g = shapedHere ? plan.cluster(cur.x) : line.grapheme(cur.x);
     if (g.length === 0) return;
     const w = line.width(cur.x) === 2 ? 2 : 1;
-    this.curGlyphRect = this.atlas!.ensure(g, styleMask(line.flags(cur.x)), w);
+    this.curGlyphRect = this.atlas!.ensure(
+      g,
+      styleMask(line.flags(cur.x)),
+      w,
+      shapedHere ? plan.hintFor(cur.x) : undefined,
+    );
   }
 
   // --- GPU upload ---------------------------------------------------------

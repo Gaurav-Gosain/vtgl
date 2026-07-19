@@ -160,23 +160,45 @@ substitutes its own clock. The contract to preserve: any number of `schedule()`
 calls produce exactly one callback, no update is ever dropped, and a `schedule()`
 during the callback lands on the following frame rather than re-entering.
 
-## Add contextual shaping: ShaperHook
+## Write a shaper: ShaperHook
 
-The interface is defined, the atlas keys by string, and the glyph instance
-carries a per-cell device-pixel offset. What is not written is the run grouping
-in the renderers or a shaper.
+Run grouping is wired into both backends, so a shaper is now a self-contained
+thing to write. `arabicShaper()` in `src/shaper/arabic.ts` is the worked example
+and is about 200 lines including its joining table.
 
 ```ts
-interface ShaperHook { shapeRun(text: string, style: RunStyle): ShapedRun; }
+interface ShaperHook {
+  participates(codepoint: number): boolean;
+  shapeRun(cells: readonly string[], style: RunStyle): ShapedRun;
+}
 ```
 
-Landing it means: group contiguous cells of identical style into runs in
-`InstanceBuffers.buildRow`, call `shapeRun` on the run text, ensure each returned
-glyph in the atlas under its `atlasKey` rather than its grapheme, and write
-`xOffset` into the glyph instance's offset slot (currently hardcoded to zero in
-both `glyphF32[gBase + 4]` and `[gBase + 5]`). The pipeline needs no new state
-and the shader needs no change. The hard part is the shaper, and the case that
-motivates it is Arabic, which a grapheme-aware VT splits one letter per cell.
+`RowShaper` (`src/renderer/runs.ts`) does the grouping: it walks a row, collects
+maximal spans of width-1 cells that `participates` accepts and that share fg, bg
+and flags, and hands each span to `shapeRun`. Grouping on colour is what makes
+reordering safe, since reversing across a colour boundary would carry characters
+into cells painted the other colour.
+
+Each returned glyph names the column it is drawn in, the string to raster, and a
+key. Three things are worth knowing:
+
+- **The key is yours to mint and it must vary with anything that changes pixels.**
+  The atlas keys by string, so shaped entries share the same cache as the
+  default path. Keep them in your own namespace: a fitted raster of some letter
+  is not interchangeable with the plain one, and colliding would poison the
+  unshaped entry.
+- **`rtl` is not cosmetic.** Chromium's canvas only honours a following joining
+  context when the raster context is right-to-left; under the default direction a
+  trailing ZWJ is dropped and every Arabic letter comes back isolated or final.
+  That was measured, and it is why the flag exists.
+- **`fitAdvance` is how a glyph is made to fit the cell the VT assigned it.** A
+  shaped letter's natural advance has nothing to do with a monospace cell, so
+  without it joining strokes land wherever the font puts them and do not meet.
+
+The mechanism generalises past Arabic: Syriac, N'Ko, Mongolian, Adlam and Thaana
+all join and would fall out of the same code given their joining tables. What
+does not generalise is Devanagari and the other complex scripts, which need
+reordering inside a cluster that the VT has already split across cells.
 
 ## Replace a whole layer
 
