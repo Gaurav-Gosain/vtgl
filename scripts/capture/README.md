@@ -18,6 +18,18 @@ fonts installed on the machine.
 | `unicode.png` | the 24-entry grapheme torture corpus from `src/testing/torture.ts`, at 1:1 |
 | `atlas.png` | the glyph atlas page that drew `unicode.png`, read back off the GPU |
 
+## Reproducibility
+
+`unicode.png` and `atlas.png` are byte-reproducible: their content comes from
+the torture corpus and the packer, so re-running produces the committed bytes.
+
+`demo.png` is not, and deliberately so. It embeds the live output of `git log
+--graph --oneline -8` and `npm test`, so every new commit and every run's test
+timings change the frame. That is the point of the shot, but it means the glyph
+count quoted in the README caption describes the committed frame rather than
+whatever the next run produces. Re-capture and update that number together, or
+leave the committed frame alone.
+
 ## Rules
 
 Every pixel is the real `WebGL2Renderer` drawing into a real WebGL2 context.
