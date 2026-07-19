@@ -26,7 +26,8 @@
     "test:browser": "node scripts/build-harness.mjs && playwright test webgl2.spec.ts",
     "bench": "node --experimental-strip-types bench/render-bench.ts",
     "bench:browser": "node scripts/build-harness.mjs && playwright test bench.spec.ts",
-    "check": "npm run typecheck && npm run test && npm run test:browser && npm run build"
+    "check": "npm run typecheck && npm run test && npm run test:browser && npm run build",
+    "capture": "node --experimental-strip-types scripts/capture/capture.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",

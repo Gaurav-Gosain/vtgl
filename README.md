@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/images/banner.png" alt="vtgl: a WebGL2 glyph-atlas terminal renderer" width="100%">
+</p>
+
 # vtgl
 
 [![DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/Gaurav-Gosain/vtgl)
@@ -7,6 +11,37 @@ A WebGL2 glyph-atlas terminal renderer for the browser, driven by a VT you suppl
 You bring the VT: something that parses escape sequences, owns a scrollback buffer, and can expose its grid one row at a time. vtgl brings the drawing: font measurement, glyph rasterization, atlas packing, instanced draws, damage-driven uploads, hit testing, and a Canvas2D fallback for environments without WebGL2. It has zero runtime dependencies and four development dependencies (esbuild to bundle, typescript to typecheck and emit declarations, `@playwright/test` to drive a real browser, `@types/node` for the build scripts). The shipped artifact is a 56 KB ESM bundle, or a 33 KB minified single file that a browser can import with no build pipeline at all.
 
 It is built to be taken apart. The VT sits behind one read-only interface (`VtSource`), the two backends implement one output interface (`Renderer`), and the pieces underneath (font metrics, render scheduling, shelf allocation, atlas packing, instance building) are exported individually and usable on their own. The instance builder is deliberately GL-free so it can be unit-tested under Node against a fake grid with no GPU present.
+
+## What it draws
+
+Every image below is the WebGL2 backend drawing in a headless chromium, captured
+by [scripts/capture](scripts/capture). Nothing is mocked up or retouched, and the
+terminal frame is the real output of the two commands it shows, run in this
+repository and parsed for SGR.
+
+<table>
+  <tr>
+    <td><img src="docs/images/demo.png" alt="A terminal frame drawn by vtgl showing the output of git log --graph and npm test, followed by box-drawing tables, block-element ramps, and a row of bold, italic, underline, strikethrough, faint, and reverse text next to the sixteen palette colours"></td>
+    <td><img src="docs/images/unicode.png" alt="The 24-entry grapheme torture corpus rendered at 1:1, each cluster beside the column count, scalar count, and cell layout it declares, with CJK, Hangul, ZWJ emoji, flags, combining stacks, Devanagari, and Arabic all confined to the cells the VT assigned them"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>a real frame of 1172 glyph instances in 3 draw calls, from one atlas page</sub></td>
+    <td align="center"><sub>the grapheme torture corpus at 1:1, nothing bleeding past its own cells</sub></td>
+  </tr>
+  <tr>
+    <td colspan="2"><img src="docs/images/atlas.png" alt="The glyph atlas page that drew the torture corpus, read back off the GPU, showing glyphs packed left to right along successive shelves with the packer's own slot rectangles outlined and wide clusters occupying double-width slots"></td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center"><sub>the atlas page that drew it, read back with <code>readPixels</code> and outlined with the packer's own slot rectangles</sub></td>
+  </tr>
+</table>
+
+The Arabic rows are the honest failure: vtgl ships no shaper, so each letter
+draws in its isolated form rather than joining. That and the rest of the known
+gaps are in [docs/limits.md](docs/limits.md).
+
+Regenerate the three with `npm run capture`, and the banner with
+`node scripts/banner/make-banner.mjs scripts/banner/configs/vtgl.json -o docs/images/banner.png`.
 
 ## What it does
 
