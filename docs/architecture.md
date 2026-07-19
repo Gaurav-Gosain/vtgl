@@ -90,7 +90,7 @@ that; emoji do. It is a heuristic, and subpixel-antialiased text could in
 principle trip it, which is one reason the browser suite runs with
 `--disable-lcd-text`.
 
-A baked, foreground-quantized key exists as `atlasKeyBaked`, appending a 5-bit
+A baked, foreground-quantized key exists as `atlasKeyBaked`, unused, appending a 5-bit
 per-channel bucket of the foreground. It is intended for a variant that bakes
 color into the glyph (subpixel antialiasing, where coverage differs per color).
 Nothing in the shipped renderers calls it.
@@ -134,15 +134,17 @@ live in preallocated typed arrays sized `cols * rows`, reused frame to frame:
 | --- | --- | --- | --- |
 | background | 1 | `cols * rows` | packed `0xRRGGBB` |
 | glyph | 8 | `cols * rows` | atlas rect (4 floats), glyph offset (2 floats), fg, style |
-| decoration | 5 | `cols * rows * 2` | rect (4 floats), color |
+| decoration | 5 | `cols * rows * 2` | rect (4 floats, y relative to the row), color |
 
 The background pass derives its cell from `gl_InstanceID` and `u_cols`, so the
 only per-instance datum is the color. The glyph pass does the same and adds the
 atlas rect, a device-pixel offset within the cell (reserved for shaper output and
 currently always zero), the packed foreground, and a style word: bit 0 colored,
 bit 1 faint, bit 2 blink, bits 8 to 15 the atlas page. Decorations are two
-instances per cell, underline and strikethrough, drawn by a solid-rect program
-shared with the cursor.
+instances per cell, underline and strikethrough, drawn by their own program: it
+derives the row from `gl_InstanceID` the way the other two do, because the y in
+the instance is relative to the row rather than absolute. The cursor rect keeps
+the plain solid-rect program, which positions in absolute device pixels.
 
 Blank cells, spacer tails, invisible cells, and undecorated cells write a
 zero-size rect, which produces a degenerate quad the rasterizer discards. That is
@@ -170,14 +172,16 @@ the same background color into both cells before the glyph pass runs.
 
 ```mermaid
 flowchart LR
-  START[render] --> SCROLL{viewportY changed<br/>since last frame?}
-  SCROLL -- yes --> FULLF[full frame]
-  SCROLL -- no --> FLAG{forceFull armed?<br/>mount, resize, setTheme}
-  FLAG -- yes --> FULLF
-  FLAG -- no --> PER[per-row isRowDirty]
+  START[render] --> FLAG{forceFull armed?<br/>mount, resize, setTheme}
+  FLAG -- yes --> FULLF[full frame]
+  FLAG -- no --> SCROLL{viewportY changed?}
+  SCROLL -- moved a whole viewport --> FULLF
+  SCROLL -- moved less --> ROT[rotate slotBase by the delta]
+  SCROLL -- no --> PER[per-row isRowDirty]
+  ROT --> PER
   FULLF --> CLEAR[clearAll to theme background]
   CLEAR --> BUILD[buildRow for every row]
-  PER --> BUILD2[buildRow for dirty rows only]
+  PER --> BUILD2[buildRow for uncovered<br/>and dirty rows only]
   BUILD --> GEN{atlas generation<br/>changed mid-build?}
   BUILD2 --> GEN
   GEN -- yes --> RETRY[restart as a full frame<br/>up to 3 attempts]
@@ -201,12 +205,39 @@ at most three times; if the last attempt still churns, it arms `forceFull` for
 the next frame rather than presenting a frame with stale rects. In practice this
 needs a working set larger than four pages to trigger at all.
 
-Scrolling is the one case where damage tracking gives no help. Moving `viewportY`
-changes which absolute rows map to which screen rows without dirtying any of
-them, so the renderer compares `viewportY` with the previous frame's and forces a
-full rebuild when it moved. Correct, and more work than necessary: the instance
-data for the overlapping rows is already right and only needs shifting. See
-[limits.md](limits.md).
+### The row ring
+
+Scrolling gets no help from damage tracking: moving `viewportY` changes which
+absolute rows map to which screen rows without dirtying any of them. So the
+renderer does not learn about the motion from damage, it computes it, and then
+shifts rather than rebuilds.
+
+The instance streams are addressed by SLOT, not by screen row. Slot `s` draws at
+screen row `(s - slotBase) mod rows`, and `slotBase` is a uniform read by the
+background, glyph and decoration vertex shaders. A scroll of n rows advances
+`slotBase` by n and rebuilds the n rows that entered the viewport; every other
+slot keeps the bytes it already has, on the CPU and on the GPU alike, and the
+upload walks dirty slots rather than dirty screen rows.
+
+This rests on one invariant: nothing written into the instance streams may encode
+a screen position. Background and glyph instances already satisfied it, since the
+vertex shader derives the cell from `gl_InstanceID`. Decorations did not, because
+they carried an absolute device-pixel y, so they now carry a y relative to their
+own row and the decoration vertex shader adds the row offset. Breaking that
+invariant is the way to break scrolling, and the browser suite catches it: it
+renders scrolled frames through the fast path and through a forced full rebuild
+and requires the two to be pixel-identical.
+
+Rows that both moved and were written are rebuilt, so a frame that scrolls and
+edits at once comes out the same as a full repaint. A scroll of a whole viewport
+or more has nothing to reuse and falls back to a full rebuild, which also resets
+`slotBase` to zero.
+
+Canvas2D reaches the same place without instance data. It blits its canvas onto
+itself by the scroll delta, then repaints the rows the blit uncovered plus the
+rows the source dirtied. Because the cursor is painted into those same pixels and
+its movement is not damage, it also repaints the row a moved cursor left, which
+is what keeps a stale block from surviving there.
 
 ## Frame scheduling
 
@@ -288,7 +319,7 @@ re-rasters every visible glyph. The browser suite forces loss and restore throug
 
 `GlyphAtlas` also carries an `onContextRestored` method that rebuilds its texture
 and flushes the packer. Nothing calls it: the renderer rebuilds the whole atlas
-instead. It is dead code today.
+instead. It is dead code today, and [limits.md](limits.md) says so.
 
 ## Testing strategy
 

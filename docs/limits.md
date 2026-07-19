@@ -25,26 +25,29 @@ other. It is a reason to choose neither if joining matters to you.
 ### Ligatures, selection, subpixel antialiasing
 
 None are implemented. Ligatures need the same run grouping shaping needs.
-Selection is a host concern: `Theme.selection` is declared and no backend reads
-it, so a host that wants selection draws its own overlay. Subpixel antialiasing
-would need foreground baked into the glyph, which is why `atlasKeyBaked` and
-`quantize` exist; nothing calls them.
+Selection is a host concern and the type surface now says so: there is no
+`Theme.selection`, and a host that wants selection draws its own overlay over
+the canvas. Subpixel antialiasing would need foreground baked into the glyph,
+which is why `atlasKeyBaked` and `quantize` exist; nothing calls them.
 
-### Blink is implemented but untested
+### Blink needs a driver
 
-The glyph fragment shader gates alpha on `step(0.5, fract(u_time))` with
-`u_time = performance.now() / 500`, so a cell carrying `CellFlags.BLINK` is
-visible for half of each 500 ms phase. No golden scenario and no test sets that
-flag, so the path has never been exercised. The Canvas2D fallback ignores blink
-entirely, which means the two backends disagree on any blinking cell.
+Cell blink works on both backends and is asserted in real pixels on each. The
+glyph fragment shader gates alpha on `step(0.5, fract(u_time))` with
+`u_time = performance.now() / 500`, and the Canvas2D path applies the same gate
+to its `fillText`, so a cell carrying `CellFlags.BLINK` is visible for half of
+each 500 ms phase on either backend.
 
-There is a second problem behind the first: the renderer runs no clock. A
-blinking cell only visibly toggles if something else keeps requesting frames, so
-on an idle screen it stays in whatever phase the last frame caught.
+What remains is that the renderer runs no clock, deliberately: it draws when it
+is asked to. A blinking cell only visibly toggles while something keeps calling
+`requestRender`, so on an idle screen it stays in whatever phase the last frame
+caught. The Canvas2D path at least does not need the host to know which rows
+blink: it notices the phase flip and repaints itself for that one frame, and
+only when a blinking cell was on screen.
 
-Cursor blink is not implemented at all. `CursorState.blink` is part of the
-contract and neither backend reads it; a host that wants a blinking cursor
-toggles `visible` in its own source and requests frames.
+Cursor blink is not implemented and is not in the contract. A host that wants a
+blinking cursor owns the clock and toggles `visible` in its own source; the
+README has the four-line version.
 
 ### Wide glyphs clip rather than bleed
 
@@ -60,48 +63,41 @@ them into one loose threshold, which is why those entries are excluded from the
 ink-ratio comparison. It does mean the backends are not interchangeable
 pixel-for-pixel on emoji-dense content.
 
-### Canvas2D can strand a cursor
-
-The WebGL2 path rebuilds the whole screen from instance data every frame, so a
-cursor that moves off a clean row vanishes from it automatically. The Canvas2D
-path repaints only dirty rows, so if the source does not mark the row the cursor
-left as dirty, the old cursor stays painted. Most VTs dirty the cursor's row on
-movement, so this rarely surfaces, but it is a real divergence between the two
-backends and not something the renderer can fix without tracking the previous
-cursor position itself.
-
 ### Declared and inert
 
-These are in the type surface and read by nothing:
+Most of what used to be listed here is gone. `Theme.selection`, `Theme.palette`,
+`VtSource.getMode`, `CursorState.blink` and the `bell` event were declared and
+read by nothing, so they were removed rather than left as traps for a consumer
+who sets one and reasonably expects an effect. What is left:
 
 | surface | status |
 | --- | --- |
-| `Theme.selection` | declared; no backend draws selection |
-| `Theme.palette` | declared; the renderer resolves no palette indices |
 | `RendererOptions.shaper` | accepted; never called |
-| `VtSource.getMode` | declared; no backend queries a mode, including 2026 |
-| `CursorState.blink` | declared; neither backend reads it |
-| `bell` event | in the event map; never emitted |
 | `atlasKeyBaked`, `quantize` | exported for a baked-foreground atlas mode that does not exist |
 | `GlyphAtlas.onContextRestored` | dead code; the renderer rebuilds the atlas instead |
 
-They are kept because each is a designed extension point with a real
-implementation sketch behind it, but nothing in the shipped renderer depends on
-any of them.
+`atlasKeyBaked` and `quantize` are one unit, since the quantizer exists only to
+build the baked key, and they sit in the atlas keying module that a shaper would
+also key through. They stay until shaping decides what the key scheme is.
 
 ## Performance gaps
 
-### Scrolling repaints in full
+### A scroll larger than the viewport repaints in full
 
-Moving the viewport changes which absolute rows map to which screen rows without
-dirtying any of them, so the renderer compares `viewportY` against the previous
-frame and rebuilds everything when it moved. The `scrollstorm` workload shows 40
-dirty rows at its natural damage with nothing written at all.
+Scrolling inside the viewport no longer rebuilds. WebGL2 addresses its instance
+streams by slot and rotates the slot-to-screen-row map, so a scroll of n rows
+rebuilds n rows and uploads n rows; Canvas2D blits the canvas onto itself and
+repaints the n rows the blit uncovered. Both are asserted pixel-identical to a
+full rebuild of the same frame, including when the scroll and a write land
+together. The `scrollstorm` workload dropped from 40 dirty rows to 3, and its
+CPU time from 1.10 ms to 0.14 ms on WebGL2 and 3.84 ms to 0.44 ms on Canvas2D.
 
-This is the largest remaining optimisation. Shifting instance data by the scroll
-delta and rebuilding only the rows that entered the viewport would make a
-one-line scroll cost about what a one-line edit costs. It is correct today and more
-work than necessary: 0.71 ms of CPU where it could be near zero.
+Past a viewport's worth of movement there is nothing on screen to reuse, so the
+crossover falls back to a full rebuild. That is the right answer rather than a
+gap, but it does mean a page-down costs a full frame.
+
+The shift also does nothing for a source that does not track damage and reports
+every row dirty. Motion is cheap now; damage still costs what it costs.
 
 ### A DPR change rebuilds rather than rescales
 
@@ -177,7 +173,7 @@ cell. A renderer that needs real layout wants a text engine, not a terminal
 renderer.
 
 It is not proven on real hardware or in production. The correctness properties
-are asserted by 100 unit tests and 16 browser tests, and the performance
+are asserted by 106 unit tests and 20 browser tests, and the performance
 properties are measured under software rasterization. What has not happened is
 burn-in on a real GPU, at several device pixel ratios and grid sizes, with a
 display attached. Until that exists, treat the GPU-side cost as unmeasured.

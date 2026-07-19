@@ -8,6 +8,12 @@
 // (background, glyphs, decorations) plus the cursor. Draw count is independent
 // of cell count. Steady-state per-frame allocation is near zero: the instance
 // buffers, run scratch, and cursor scratch are all preallocated and reused.
+//
+// Scrolling does not rebuild. The instance streams are addressed by slot, and
+// slot s draws at screen row (s - slotBase) mod rows, so moving the viewport by
+// n rows is a rotation of slotBase plus a rebuild of the n rows that entered the
+// viewport. Nothing in the instance data encodes a screen position, which is the
+// invariant that makes the rotation sound; see instances.ts and gl/shaders.ts.
 
 import { CellFlags } from '../types.ts';
 import { Emitter } from '../events.ts';
@@ -25,6 +31,7 @@ import {
   glyphVert,
   glyphFrag,
   glyphAtVert,
+  decoVert,
   solidVert,
   solidFrag,
 } from '../gl/shaders.ts';
@@ -88,8 +95,16 @@ export class WebGL2Renderer implements Renderer {
   private lastCursorKey = -1;
   // Viewport row drawn at the top of the last frame. Scrolling changes which
   // absolute rows map to which screen rows without dirtying any of them, so a
-  // change here has to force a full rebuild or the screen keeps stale content.
+  // change here is what drives the slot rotation below.
   private lastViewportY = -1;
+  // Slot holding screen row 0. Slot s draws at screen row (s - slotBase) mod
+  // rows; a scroll of n rows advances this by n and rebuilds only the rows that
+  // entered the viewport. Reset to 0 on any full frame.
+  private slotBase = 0;
+  // Signed scroll applied to slotBase this frame, 0 when the viewport is still.
+  // Positive means the viewport moved down, so the rows that entered are at the
+  // bottom of the screen.
+  private scrolled = 0;
 
   // Scratch raster surface for the atlas.
   private scratch: AnyCanvas | null = null;
@@ -102,6 +117,7 @@ export class WebGL2Renderer implements Renderer {
   private bgProg: ProgramInfo | null = null;
   private glyphProg: ProgramInfo | null = null;
   private glyphAtProg: ProgramInfo | null = null;
+  private decoProg: ProgramInfo | null = null;
   private solidProg: ProgramInfo | null = null;
   private bgBuf: WebGLBuffer | null = null;
   private glyphBuf: WebGLBuffer | null = null;
@@ -258,9 +274,22 @@ export class WebGL2Renderer implements Renderer {
 
     // Clear the flag before building: buildFrame may legitimately re-arm it to
     // request another full frame (for example after an atlas flush).
-    const wasFull = this.forceFull || viewportY !== this.lastViewportY;
-    this.lastViewportY = viewportY;
+    let wasFull = this.forceFull;
     this.forceFull = false;
+    this.scrolled = 0;
+    const delta = this.lastViewportY < 0 ? 0 : viewportY - this.lastViewportY;
+    this.lastViewportY = viewportY;
+    if (!wasFull && delta !== 0) {
+      // Past a viewport's worth of movement nothing on screen survives, so the
+      // rotation would rebuild every row anyway and a full frame is cheaper.
+      if (delta <= -this.rows || delta >= this.rows) {
+        wasFull = true;
+      } else {
+        this.scrolled = delta;
+        this.slotBase = mod(this.slotBase + delta, this.rows);
+      }
+    }
+    if (wasFull) this.slotBase = 0;
 
     const { full, dirtyRows, glyphs } = this.buildFrame(source, viewportY, wasFull);
     this.uploadInstances(full);
@@ -278,10 +307,11 @@ export class WebGL2Renderer implements Renderer {
   }
 
   /**
-   * Recompute the CPU instance shadow for dirty rows. If a glyph miss flushes
-   * the atlas mid-build (generation change), every earlier rect is stale, so
-   * restart once as a full rebuild into the fresh atlas. Bounded by
-   * MAX_BUILD_ATTEMPTS.
+   * Recompute the CPU instance shadow for the rows that need it: everything on a
+   * full frame, otherwise the rows the source reports dirty plus the rows a
+   * scroll just exposed. If a glyph miss flushes the atlas mid-build (generation
+   * change), every earlier rect is stale, so restart once as a full rebuild into
+   * the fresh atlas. Bounded by MAX_BUILD_ATTEMPTS.
    */
   private buildFrame(
     source: VtSource,
@@ -297,15 +327,30 @@ export class WebGL2Renderer implements Renderer {
       const gen = atlas.generation;
       glyphs = 0;
       dirtyRows = 0;
-      if (full) this.buffers.clearAll(this.theme);
+      if (full) {
+        this.slotBase = 0;
+        this.buffers.clearAll(this.theme);
+      }
+      // Rows uncovered by this frame's scroll. They are rebuilt whether or not
+      // the source calls them dirty: their slot still holds the row that just
+      // left the far edge of the viewport.
+      const scrolled = full ? 0 : this.scrolled;
+      const exposedFrom = scrolled > 0 ? this.rows - scrolled : 0;
+      const exposedTo = scrolled < 0 ? -scrolled : scrolled > 0 ? this.rows : 0;
 
+      this.dirtyFlags.fill(0);
       for (let vr = 0; vr < this.rows; vr++) {
         const absRow = viewportY + vr;
-        const dirty = full || source.isRowDirty(absRow);
-        this.dirtyFlags[vr] = dirty ? 1 : 0;
-        if (!dirty) continue;
+        const exposed = vr >= exposedFrom && vr < exposedTo;
+        if (!full && !exposed && !source.isRowDirty(absRow)) continue;
+        const slot = this.slotFor(vr);
+        this.dirtyFlags[slot] = 1;
         dirtyRows++;
-        glyphs += this.buffers.buildRow(source, absRow, vr, atlas).glyphs;
+        // An exposed slot holds an unrelated row, so a leading spacer cell would
+        // inherit its background. Rebuilt dirty rows keep the old occupant's
+        // colors in that one degenerate case, as they always have.
+        if (exposed) this.buffers.clearSlotBg(slot, this.theme.background);
+        glyphs += this.buffers.buildRow(source, absRow, slot, atlas).glyphs;
       }
 
       this.resolveCursor(source, viewportY);
@@ -319,6 +364,12 @@ export class WebGL2Renderer implements Renderer {
     }
 
     return { full, dirtyRows, glyphs };
+  }
+
+  /** Slot currently holding screen row `vr`. */
+  private slotFor(vr: number): number {
+    const s = vr + this.slotBase;
+    return s >= this.rows ? s - this.rows : s;
   }
 
   private resolveCursor(source: VtSource, viewportY: number): void {
@@ -364,26 +415,28 @@ export class WebGL2Renderer implements Renderer {
       return;
     }
 
-    // Coalesce contiguous dirty rows into runs and upload each run once. Byte
-    // offsets are computed inline rather than through the *Range helpers so the
-    // steady-state upload path allocates nothing at all.
+    // Coalesce contiguous dirty slots into runs and upload each run once. The
+    // flags are indexed by slot, not screen row, because that is how the buffers
+    // are laid out; a scroll leaves every clean slot where it already sits on
+    // the GPU. Byte offsets are computed inline rather than through the *Range
+    // helpers so the steady-state upload path allocates nothing at all.
     const perRowBg = this.cols * 4;
     const perRowGlyph = this.cols * GLYPH_UNITS * 4;
     const perRowDeco = this.cols * DECO_PER_CELL * DECO_UNITS * 4;
-    let vr = 0;
-    while (vr < this.rows) {
-      if (this.dirtyFlags[vr] === 0) {
-        vr++;
+    let slot = 0;
+    while (slot < this.rows) {
+      if (this.dirtyFlags[slot] === 0) {
+        slot++;
         continue;
       }
-      let end = vr;
+      let end = slot;
       while (end + 1 < this.rows && this.dirtyFlags[end + 1] === 1) end++;
-      const span = end - vr + 1;
+      const span = end - slot + 1;
 
-      this.uploadRun(gl, this.bgBuf, b.bgBytes, vr * perRowBg, span * perRowBg);
-      this.uploadRun(gl, this.glyphBuf, b.glyphBytes, vr * perRowGlyph, span * perRowGlyph);
-      this.uploadRun(gl, this.decoBuf, b.decoBytes, vr * perRowDeco, span * perRowDeco);
-      vr = end + 1;
+      this.uploadRun(gl, this.bgBuf, b.bgBytes, slot * perRowBg, span * perRowBg);
+      this.uploadRun(gl, this.glyphBuf, b.glyphBytes, slot * perRowGlyph, span * perRowGlyph);
+      this.uploadRun(gl, this.decoBuf, b.decoBytes, slot * perRowDeco, span * perRowDeco);
+      slot = end + 1;
     }
   }
 
@@ -427,6 +480,8 @@ export class WebGL2Renderer implements Renderer {
       gl.uniform2f(p.u.u_resolution, w, h);
       gl.uniform2f(p.u.u_cellSize, this.cellW, this.cellH);
       gl.uniform1i(p.u.u_cols, this.cols);
+      gl.uniform1i(p.u.u_slotBase, this.slotBase);
+      gl.uniform1i(p.u.u_rows, this.rows);
       gl.bindVertexArray(this.bgVao);
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, cellCount);
       calls++;
@@ -443,6 +498,8 @@ export class WebGL2Renderer implements Renderer {
       gl.uniform2f(p.u.u_cellSize, this.cellW, this.cellH);
       gl.uniform2f(p.u.u_atlasSize, atlasSize, atlasSize);
       gl.uniform1i(p.u.u_cols, this.cols);
+      gl.uniform1i(p.u.u_slotBase, this.slotBase);
+      gl.uniform1i(p.u.u_rows, this.rows);
       gl.uniform1f(p.u.u_time, time);
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.atlas!.texture);
@@ -454,9 +511,14 @@ export class WebGL2Renderer implements Renderer {
 
     // Decoration pass (underline + strikethrough as solid quads).
     {
-      const p = this.solidProg!;
+      const p = this.decoProg!;
       gl.useProgram(p.prog);
       gl.uniform2f(p.u.u_resolution, w, h);
+      gl.uniform2f(p.u.u_cellSize, this.cellW, this.cellH);
+      gl.uniform1i(p.u.u_cols, this.cols);
+      gl.uniform1i(p.u.u_perCell, DECO_PER_CELL);
+      gl.uniform1i(p.u.u_slotBase, this.slotBase);
+      gl.uniform1i(p.u.u_rows, this.rows);
       gl.bindVertexArray(this.decoVao);
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, this.buffers.decoCount);
       calls++;
@@ -593,12 +655,20 @@ export class WebGL2Renderer implements Renderer {
   private createGLResources(): void {
     const gl = this.gl;
     if (!gl) return;
-    this.bgProg = makeProgram(gl, bgVert, bgFrag, ['u_resolution', 'u_cellSize', 'u_cols']);
+    this.bgProg = makeProgram(gl, bgVert, bgFrag, [
+      'u_resolution',
+      'u_cellSize',
+      'u_cols',
+      'u_slotBase',
+      'u_rows',
+    ]);
     this.glyphProg = makeProgram(gl, glyphVert, glyphFrag, [
       'u_resolution',
       'u_cellSize',
       'u_atlasSize',
       'u_cols',
+      'u_slotBase',
+      'u_rows',
       'u_atlas',
       'u_time',
     ]);
@@ -608,6 +678,14 @@ export class WebGL2Renderer implements Renderer {
       'u_origin',
       'u_atlas',
       'u_time',
+    ]);
+    this.decoProg = makeProgram(gl, decoVert, solidFrag, [
+      'u_resolution',
+      'u_cellSize',
+      'u_cols',
+      'u_perCell',
+      'u_slotBase',
+      'u_rows',
     ]);
     this.solidProg = makeProgram(gl, solidVert, solidFrag, ['u_resolution']);
 
@@ -644,7 +722,13 @@ export class WebGL2Renderer implements Renderer {
   private destroyGLResources(): void {
     const gl = this.gl;
     if (!gl) return;
-    for (const p of [this.bgProg, this.glyphProg, this.glyphAtProg, this.solidProg]) {
+    for (const p of [
+      this.bgProg,
+      this.glyphProg,
+      this.glyphAtProg,
+      this.decoProg,
+      this.solidProg,
+    ]) {
       if (p) gl.deleteProgram(p.prog);
     }
     for (const b of [this.bgBuf, this.glyphBuf, this.decoBuf, this.cursorRectBuf, this.cursorGlyphBuf]) {
@@ -655,7 +739,8 @@ export class WebGL2Renderer implements Renderer {
     }
     if (this.atlas) this.atlas.destroy();
     this.atlas = null;
-    this.bgProg = this.glyphProg = this.glyphAtProg = this.solidProg = null;
+    this.bgProg = this.glyphProg = this.glyphAtProg = null;
+    this.decoProg = this.solidProg = null;
   }
 
   private sizeInstanceGpuBuffers(): void {
@@ -801,6 +886,12 @@ function get2d(canvas: AnyCanvas): Ctx2D {
 
 function cursorShapeBit(shape: string): number {
   return shape === 'bar' ? 1 : shape === 'underline' ? 2 : 0;
+}
+
+/** Euclidean modulo: the scroll delta may be negative. */
+function mod(a: number, n: number): number {
+  const m = a % n;
+  return m < 0 ? m + n : m;
 }
 
 function globalDpr(): number {

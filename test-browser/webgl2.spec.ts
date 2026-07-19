@@ -108,13 +108,78 @@ test('uploads are damage driven: clean frames re-upload nothing', async ({ page 
   expect(new Set(stats.map((s) => s.drawCalls)).size).toBe(1);
 });
 
-test('scrolling repaints even though no row is dirty', async ({ page }) => {
+test('scrolling rebuilds only the rows that entered the viewport', async ({ page }) => {
   const r = await page.evaluate(() => (window as any).harness.scrollProbe());
-  expect(r.scrollForcedFull, 'a viewport change forces a full rebuild').toBe(true);
+  expect(r.scrollFull, 'a one-row scroll is not a full rebuild').toBe(false);
+  expect(r.scrollDirtyRows, 'a one-row scroll costs one row').toBe(1);
   expect(r.pixelsChanged, 'the framebuffer actually shows the new rows').toBe(true);
+  expect(r.beyondViewportFull, 'a jump past the viewport has nothing to reuse').toBe(true);
   expect(r.stationaryFull, 'a stationary viewport goes back to incremental').toBe(false);
   expect(r.stationaryDirtyRows).toBe(0);
 });
+
+// The scroll fast path reuses instance data and pixels that were produced for a
+// different screen row. The only argument that this is sound is that the frame
+// it produces is indistinguishable from one rebuilt from scratch, so that is
+// asserted directly, pixel for pixel, on both backends. The cases deliberately
+// include scroll and writes landing in the same frame, which is where a naive
+// implementation loses a row.
+for (const backend of ['webgl2', 'canvas2d'] as const) {
+  test(`the scroll fast path is pixel-identical to a full rebuild: ${backend}`, async ({
+    page,
+  }) => {
+    interface Case {
+      name: string;
+      dirtyRows: number;
+      full: boolean;
+      differing: number;
+      total: number;
+      maxChannelDelta: number;
+    }
+    const cases: Case[] = await page.evaluate(
+      (b) => (window as any).harness.scrollEquivalence(b),
+      backend,
+    );
+    expect(cases.length).toBeGreaterThan(8);
+    for (const c of cases) {
+      expect(c.total).toBeGreaterThan(0);
+      expect(
+        c.differing,
+        `${backend}/${c.name}: ${c.differing}/${c.total} px differ from a full rebuild ` +
+          `(max channel delta ${c.maxChannelDelta})`,
+      ).toBe(0);
+    }
+    // Equivalence alone would also be satisfied by never taking the fast path,
+    // so pin the work each case did: a scroll inside the viewport must rebuild
+    // only the rows it uncovered plus whatever the source dirtied.
+    const byName = new Map(cases.map((c) => [c.name, c]));
+    expect(byName.get('down-one')!.full).toBe(false);
+    expect(byName.get('down-one')!.dirtyRows).toBe(1);
+    expect(byName.get('up-one')!.dirtyRows).toBe(1);
+    expect(byName.get('down-seven')!.dirtyRows).toBe(7);
+    expect(byName.get('beyond-viewport')!.full, 'past a viewport, rebuild').toBe(true);
+    // Two rows uncovered by the scroll plus the two written rows, both of which
+    // are inside the frame's viewport.
+    expect(byName.get('scroll-and-write-down')!.full).toBe(false);
+    expect(byName.get('scroll-and-write-down')!.dirtyRows).toBe(4);
+  });
+}
+
+// Blink used to be shader-only and untested. It is asserted in real pixels on
+// both backends now, because the Canvas2D path implements it too and the two
+// disagreeing on a blinking cell was a genuine divergence.
+for (const backend of ['webgl2', 'canvas2d'] as const) {
+  test(`a blinking cell is drawn in one phase and hidden in the other: ${backend}`, async ({
+    page,
+  }) => {
+    const r = await page.evaluate(
+      (b) => (window as any).harness.blinkProbe(b),
+      backend,
+    );
+    expect(r.inked, `${backend} never drew the blinking glyph`).toBeGreaterThan(0);
+    expect(r.blank, `${backend} never hid the blinking glyph`).toBeGreaterThan(0);
+  });
+}
 
 test('the atlas caches glyphs: repeat frames upload nothing new', async ({ page }) => {
   const a = await page.evaluate(() => (window as any).harness.atlasProbe());

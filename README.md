@@ -122,9 +122,10 @@ flowchart LR
   REQ[requestRender<br/>source plus viewportY] --> COAL{frame already booked?}
   COAL -- yes --> DROP[coalesce<br/>counted, not queued]
   COAL -- no --> RAF[next animation frame]
-  RAF --> FULL{full redraw?<br/>mount, resize, theme, scroll}
+  RAF --> FULL{full redraw?<br/>mount, resize, theme,<br/>scroll past a viewport}
   FULL -- yes --> ALL[rebuild every row]
-  FULL -- no --> DIRTY[rebuild rows where<br/>isRowDirty is true]
+  FULL -- no --> SHIFT[shift by the scroll delta:<br/>rotate slots, or blit the canvas]
+  SHIFT --> DIRTY[rebuild rows the scroll uncovered<br/>plus rows where isRowDirty is true]
   ALL --> ROW[buildRow<br/>background, glyph, decoration instances]
   DIRTY --> ROW
   ROW --> KEY[atlasKey<br/>grapheme plus bold/italic mask]
@@ -140,7 +141,9 @@ Every stage after the damage test is proportional to dirty rows, not to grid siz
 
 The atlas can invalidate a frame from underneath the builder. When a miss cannot be placed even after growing to the page cap, the packer flushes every entry and bumps a generation counter, which makes every rect resolved earlier in the same frame stale. The renderer notices the generation change and restarts the build as a full frame into the fresh atlas, up to three attempts; if the last attempt still churns, it arms a full redraw for the next frame rather than leaving the screen wrong.
 
-Scrolling is a change of `viewportY`, not a write, so no row reports dirty. The renderer compares `viewportY` against the previous frame's and forces a full rebuild when it moved. That is correct and pessimistic; see [Limitations](#limitations).
+Scrolling is a change of `viewportY`, not a write, so no row reports dirty. Instead of rebuilding, the renderer shifts. WebGL2 addresses its instance streams by slot rather than by screen row and keeps a rotating slot-to-row map in a uniform, so a scroll of n rows is a change to that uniform plus a rebuild of the n rows that entered the viewport; nothing in the instance data encodes a screen position, which is the invariant the rotation rests on. Canvas2D does the same thing in pixels, blitting the canvas onto itself and repainting the n rows the blit uncovered. Rows that both moved and changed are rebuilt, so scroll and damage in one frame come out the same as a full repaint. A jump larger than the viewport has nothing to reuse and falls back to a full rebuild.
+
+That equivalence is asserted rather than argued: the browser suite renders scrolled frames through the fast path and through a forced full rebuild and requires the two to be pixel-identical, on both backends, including the scroll-plus-write case.
 
 ## Quick start
 
@@ -261,7 +264,6 @@ interface VtSource {
   // correct and slower.
   isRowDirty(row: number): boolean;
 
-  getMode?(mode: number): boolean;  // declared; no backend calls it today
 }
 ```
 
@@ -275,7 +277,14 @@ The rules an implementation must honour:
 - **`flags`** is a bitfield of `CellFlags`: `BOLD`, `ITALIC`, `UNDERLINE`, `STRIKETHROUGH`, `INVERSE`, `INVISIBLE`, `BLINK`, `FAINT`. The values match ghostty-vt's layout, so the reference adapter passes wasm flags through unchanged.
 - **`isRowDirty` is read-only for the renderer.** Whoever drives the source clears dirty state, out of band from `render()`.
 
-`getCursor()` returns `{ x, y, visible, shape, blink }`, where `x` is a 0-based column and `y` is an absolute buffer row. Both backends honour `visible` and `shape`; neither reads `blink`.
+`getCursor()` returns `{ x, y, visible, shape }`, where `x` is a 0-based column and `y` is an absolute buffer row. Both backends honour `visible` and `shape`. There is no `blink` field, because the renderer has no clock to blink against; a host that wants a blinking cursor owns the timer:
+
+```js
+setInterval(() => {
+  cursorVisible = !cursorVisible;      // your source returns this from getCursor()
+  renderer.requestRender(source, viewportY);
+}, 530);
+```
 
 ## The Renderer interface
 
@@ -303,7 +312,7 @@ interface Renderer {
 }
 ```
 
-`RendererOptions` takes `fontFamily`, `fontSize`, optional `lineHeight` (default 1.2), `letterSpacing`, `dpr`, a `theme`, `resolveInverse`, and an optional `shaper` that is accepted and currently ignored. `getMetrics()` reports device-pixel and CSS-pixel cell sizes, the baseline offset, the backing-store size, and the resolved font settings, which is what a host needs to keep its own geometry in sync. Events are `render` (a `RenderStats`) and `cursorMove` (a `CellCoord` carrying an absolute row); `bell` is declared in the event map and never emitted, because the renderer has no VT event stream to raise it from.
+`RendererOptions` takes `fontFamily`, `fontSize`, optional `lineHeight` (default 1.2), `letterSpacing`, `dpr`, a `theme`, `resolveInverse`, and an optional `shaper` that is accepted and currently ignored. `getMetrics()` reports device-pixel and CSS-pixel cell sizes, the baseline offset, the backing-store size, and the resolved font settings, which is what a host needs to keep its own geometry in sync. Events are `render` (a `RenderStats`) and `cursorMove` (a `CellCoord` carrying an absolute row).
 
 Also exported: `supportsWebGL2()`, `RenderScheduler`, `computeCellMetrics`, `measureFont`, `GlyphAtlas`, `AtlasPacker`, `ShelfAllocator`, `atlasKey`, `atlasKeyBaked`, `styleMask`, `InstanceBuffers`, `StyleBit`, the color helpers (`rgb`, `toCss`, `quantize`), and `Emitter`. [docs/extending.md](docs/extending.md) covers which of these are seams and what each costs to replace.
 
@@ -332,26 +341,26 @@ Blank and tui are the two cases Canvas2D wins or ties. Both are nearly empty scr
 The full list, with the reasoning and the memory ceilings, is [docs/limits.md](docs/limits.md). The ones that decide whether vtgl fits:
 
 - **No contextual shaping.** Arabic joining is wrong. A grapheme-aware VT puts one Arabic letter per cell (the torture corpus records this as the `split` layout, measured against ghostty-vt rather than assumed), and vtgl draws each in isolated form, so a word does not join. The `ShaperHook` interface is defined and the atlas keys by string specifically so shaped runs can slot into the same cache, but no shaper is written and the `shaper` option is ignored by both backends. xterm.js does not do contextual shaping either, so this is not a gap relative to the obvious alternative.
-- **Scrolling repaints in full.** Moving the viewport rebuilds and re-uploads every row even though no cell changed. The `scrollstorm` benchmark shows 40 dirty rows at natural damage with nothing written. Shifting instance data by the scroll delta would make a one-line scroll cost about what a one-line edit costs; that is the largest remaining optimisation.
+- **A scroll larger than the viewport repaints in full.** Scrolling inside the viewport shifts instead of rebuilding, so an n-row scroll costs n rows on both backends: `scrollstorm` at natural damage went from 40 dirty rows to 3, and from 1.10 ms to 0.14 ms of WebGL2 CPU. Past a viewport's worth of movement nothing on screen survives and the frame is rebuilt, so a page-down still costs a full frame.
 - **A DPR change rebuilds rather than rescales.** Cell geometry drove the atlas slot sizes, so `resize()` with a new device pixel ratio throws the whole atlas away and re-rasters every glyph over the following frames.
-- **Blink is implemented but untested, and needs a driver.** The glyph shader gates alpha on a 500 ms `u_time` phase, but no scenario or test sets `CellFlags.BLINK`, the Canvas2D fallback ignores it entirely, and the renderer runs no clock, so a blinking cell only visibly toggles if something keeps requesting frames. Cursor blink is not implemented at all: `CursorState.blink` is in the contract and neither backend reads it.
+- **Blink needs a driver.** Cell blink works on both backends and is asserted in real pixels on each, but the renderer runs no clock: a blinking cell only visibly toggles while something keeps calling `requestRender`. Cursor blink is not implemented and is not in the contract; a host that wants one toggles `visible` on its own timer.
 - **Benchmarks were measured under software rasterization.** Only the CPU-side figures, the draw-call counts, and the allocation numbers transfer to real hardware. See [docs/benchmarks.md](docs/benchmarks.md).
 - **Pixel parity is a tolerance, over part of the corpus.** Four golden scenarios are compared under a 2% differing-pixel budget and the emoji scenario under 5%, not all nine and not pixel-exact. The 24-entry torture corpus is compared by ink coverage per cell rather than per pixel, because those rows are mostly background and a subpixel shift swings the differing-pixel fraction while nothing is wrong.
 - **Wide glyphs are clipped, not bled.** A glyph whose font advance exceeds the cells the VT assigned it is clipped by its atlas slot, where Canvas2D lets it paint outside. Measured on the torture corpus, Canvas2D bleeds into the next cell on 9 of 24 entries and the WebGL2 path on none. Both behaviours are defensible; the tests record each rather than pretending they match.
-- **Several contract fields are declared and inert.** `Theme.selection`, `Theme.palette`, `RendererOptions.shaper`, `VtSource.getMode`, `CursorState.blink`, and the `bell` event are part of the types and are not read or emitted by either backend. `atlasKeyBaked` and `quantize` are exported for a baked foreground-quantized atlas mode that is not implemented.
-- **No selection overlays, ligatures, or subpixel antialiasing.** A host that wants selection draws it itself.
+- **Two contract surfaces are still declared and inert.** `RendererOptions.shaper` is accepted and never called, and `atlasKeyBaked` and `quantize` are exported for a baked foreground-quantized atlas mode that is not implemented. `Theme.selection`, `Theme.palette`, `VtSource.getMode`, `CursorState.blink` and the `bell` event used to be on this list and were removed instead, because a field a consumer can set and the renderer ignores is a trap rather than an extension point.
+- **No selection overlays, ligatures, or subpixel antialiasing.** A host that wants selection draws its own overlay over the canvas.
 
 ## Tests
 
 ```
 npm run typecheck
-npm run test          # 100 unit tests under node:test
-npm run test:browser  # 16 Playwright tests against the system chromium
+npm run test          # 106 unit tests under node:test
+npm run test:browser  # 20 Playwright tests against the system chromium
 npm run build
 npm run check         # all of the above, in order
 ```
 
-The unit tests cover the shelf allocator, the multi-page packer, atlas keying, cell metrics, the render scheduler, the instance builder against a fake glyph provider, the Canvas2D renderer against a recording canvas, the fake source, and the grapheme torture corpus. The browser tests cover backend selection, pixel parity against the Canvas2D reference, draw-call flatness across three grid sizes spanning a 120x cell-count range, damage-driven upload counts, atlas cache-hit behaviour, context-loss recovery, and per-cluster ink and bleed on the torture corpus.
+The unit tests cover the shelf allocator, the multi-page packer, atlas keying, cell metrics, the render scheduler, the instance builder against a fake glyph provider, the Canvas2D renderer against a recording canvas, the fake source, and the grapheme torture corpus. The browser tests cover backend selection, pixel parity against the Canvas2D reference, draw-call flatness across three grid sizes spanning a 120x cell-count range, damage-driven upload counts, pixel-exact equivalence between the scroll fast path and a full rebuild on both backends, blink toggling in real pixels, atlas cache-hit behaviour, context-loss recovery, and per-cluster ink and bleed on the torture corpus.
 
 The browser suite drives the system chromium at `/usr/bin/chromium` and downloads no browser binaries; point `VTGL_CHROMIUM` at another executable to override. It loads the harness from disk over a `file://` URL, so no static server is involved, and it runs with `--disable-lcd-text` and `--force-device-scale-factor=1`, which means parity is verified under grayscale antialiasing at one device pixel ratio only.
 

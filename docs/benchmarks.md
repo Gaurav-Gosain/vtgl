@@ -65,7 +65,7 @@ measured against the 2D bundle.
 | --- | --- | --- | --- | --- |
 | dump (colored log scrolling) | 40 | 1.27 ms | 3.28 ms | 2.6x |
 | altscreen (animated panel) | 8 | 0.21 ms | 0.62 ms | 3.0x |
-| scrollstorm (viewport dragged) | 40 | 1.04 ms | 3.30 ms | 3.2x |
+| scrollstorm (viewport dragged 3 lines) | 3 | 0.14 ms | 0.44 ms | 3.1x |
 | tui (idle, status line ticks) | 1 | 0.06 ms | 0.07 ms | 1.1x |
 
 Two things worth reading off this. A dump genuinely dirties the whole screen
@@ -73,11 +73,28 @@ every frame, so damage tracking buys nothing there and the win is entirely the
 draw-call collapse. An idle TUI dirties one row, both backends are effectively
 free, and the renderer choice does not matter.
 
-Scrollstorm shows 40 dirty rows in natural mode despite nothing being written,
-because vtgl currently repaints in full whenever the viewport moves. That is
-correct but pessimistic, and it is the largest remaining optimisation: shifting
-instance data by the scroll delta would make a one-line scroll cost about what
-a one-line edit costs.
+Scrollstorm used to show 40 dirty rows in natural mode despite nothing being
+written, because vtgl repainted in full whenever the viewport moved. It now
+shifts instead: WebGL2 rotates the slot-to-screen-row map its instance streams
+are addressed through, Canvas2D blits the canvas onto itself, and both rebuild
+only the rows the scroll uncovered. Dragging the viewport three lines a frame
+costs three rows.
+
+Measured on one machine, before and after the change, at the same session:
+
+| workload | dirty rows | webgl2 cpu | canvas2d cpu |
+| --- | --- | --- | --- |
+| scrollstorm, repaint in full | 40 | 1.098 ms | 3.838 ms |
+| scrollstorm, shifted | 3 | 0.143 ms | 0.438 ms |
+
+The claim that motivated the work was that a one-line scroll should cost about
+what a one-line edit costs. A three-line scroll now costs 0.143 ms on WebGL2,
+against 0.175 ms for `tui`, which repaints a single status line. That is the
+claim, met.
+
+The `full` mode figures for scrollstorm are unchanged by this, and should be:
+that mode forces every row dirty, so it measures a full repaint whatever the
+viewport does.
 
 ## Comparison against the previously measured 2D bundle
 

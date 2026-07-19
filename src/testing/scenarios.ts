@@ -234,7 +234,6 @@ export const altScreenScenario: Scenario = {
   rows: ROWS,
   build() {
     const s = new FakeSource({ cols: COLS, rows: ROWS, fg: FG, bg: BG });
-    s.setMode(1049, true); // alt screen active
     s.clearRegion(s.activeTop, s.activeTop + ROWS);
     drawChrome(s);
     drawPanel(s, 0);
