@@ -1,9 +1,9 @@
 # Third-party provenance
 
-vtgl carries no vendored third-party code. Two modules were written by
-following the approach taken in xterm.js, which is MIT licensed. Neither is a
-verbatim copy; both are reimplementations against vtgl's own interfaces. This
-file records the provenance anyway, so the lineage is not lost.
+vtgl carries no vendored third-party code. Three modules were written by
+following the approach taken in xterm.js, which is MIT licensed. None is a
+verbatim copy; all three are reimplementations against vtgl's own interfaces.
+This file records the provenance anyway, so the lineage is not lost.
 
 ## xterm.js
 
@@ -19,6 +19,13 @@ Licensed under the MIT License.
 - `src/renderer/scheduler.ts` coalesces render requests into one render per
   animation frame. The contract follows xterm.js's `RenderDebouncer` in
   `src/browser/RenderDebouncer.ts`.
+
+- `src/renderer/box-drawing.ts` draws U+2500..U+259F as vector sprites over the
+  cell rectangle instead of rastering the font's glyphs, so that adjacent cells
+  abut. xterm.js does the same thing and for the same reason, in
+  `src/browser/renderer/shared/CustomGlyphs.ts`. The shape definitions here were
+  written from the Unicode charts rather than taken from that file: the arm
+  table, the double-junction rules and the shade lattice are vtgl's own.
 
 The MIT License permits this use. The full license text is available at
 https://github.com/xtermjs/xterm.js/blob/master/LICENSE

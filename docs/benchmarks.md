@@ -192,6 +192,77 @@ This is why the shaper is opt-in rather than on by default. A host that renders
 Arabic can pay it; a host that does not should not have to reason about whether
 it is paying it.
 
+## Box-drawing and block sprites
+
+U+2500..U+259F is drawn from the cell rectangle rather than rastered from the
+face, so that stacked cells meet. This is what that cost, measured the same way
+as the shaping table above: the sprite path switched off and on, five
+interleaved rounds, the median of the per-round ratios. Four of the five rounds
+completed on both halves and only those four are paired here. Machine: an Intel
+i7-10700 at 2.9 GHz under Linux, system chromium headless, 120x40 grid, 60
+frames per measurement after a 10 frame warm-up, every row forced dirty.
+
+`blocks` is a screen where every cell is a box or block element, about a third
+of them shades. It is not a realistic workload; it is there to bound what the
+sprites can cost. `ascii` is dense plain text, `altscreen` a TUI whose progress
+bars use block and shade characters, `tui` a mostly blank editor screen.
+
+| scenario | backend | font path | sprite path | median ratio |
+| --- | --- | --- | --- | --- |
+| blocks | webgl2 | 1.060 ms | 1.124 ms | 1.00x |
+| blocks | canvas2d | 4.232 ms | 2.728 ms | 0.64x |
+| ascii | webgl2 | 1.043 ms | 1.018 ms | 0.96x |
+| ascii | canvas2d | 3.990 ms | 3.868 ms | 1.00x |
+| altscreen | webgl2 | 0.423 ms | 0.417 ms | 0.99x |
+| altscreen | canvas2d | 1.081 ms | 0.949 ms | 0.82x |
+| tui | webgl2 | 0.275 ms | 0.289 ms | 1.14x |
+| tui | canvas2d | 0.306 ms | 0.264 ms | 0.88x |
+
+Plain text is untouched on both backends, which is the first thing to check: the
+sprite path is a range test on the grapheme and it rejects before anything else
+happens.
+
+WebGL2 does not notice the sprites even on a screen made of nothing else,
+because a sprite goes into an atlas slot once and every later frame is a cache
+hit exactly as it is for a font glyph. The atlas upload count over the measured
+window was zero in every run.
+
+Canvas2D has no glyph cache and redraws every cell every frame, so there the
+sprites replace a `fillText` with a handful of `fillRect` calls and come out
+36% cheaper on the block screen.
+
+The wall time including a forced readback tells a different story, and only for
+the shades:
+
+| scenario | backend | font path | sprite path |
+| --- | --- | --- | --- |
+| blocks | webgl2 | 164.6 ms | 168.6 ms |
+| blocks | canvas2d | 7.5 ms | 80.1 ms |
+| altscreen | canvas2d | 1.95 ms | 25.85 ms |
+| ascii | canvas2d | 7.0 ms | 6.75 ms |
+
+The three shades are an ordered dither, and a dithered fill is expensive for a
+software rasterizer in a way a font glyph's antialiased blob is not. The same
+`blocks` screen with the shades swapped for solid blocks measured 2.36 ms of
+render CPU and 5.4 ms of wall time on Canvas2D, against the font path's 4.23 ms
+and 7.5 ms: faster on both. So the whole of the wall-time regression is the
+shades, and none of it is the box-drawing or block geometry.
+
+Three ways of drawing the shades on Canvas2D were measured on the `blocks`
+screen:
+
+| mechanism | render CPU | wall time |
+| --- | --- | --- |
+| one fill per lit pixel | 51.0 ms | 51.3 ms |
+| a cached cell-sized bitmap, blitted per cell | 5.3 ms | 128.1 ms |
+| a cached repeating fill, phased per cell | 2.7 ms | 80.1 ms |
+
+The repeating fill is what ships. It has the lowest cost inside `render()`, and
+that is the figure that blocks a host's main thread; the wall-time column is
+software rasterization, which is exactly the part of this environment that does
+not transfer. Whether a GPU-composited 2D canvas closes the gap is not measured
+here and is not claimed.
+
 ## What would change on real hardware
 
 The CPU column stays roughly as measured, because it is grid-walking and buffer

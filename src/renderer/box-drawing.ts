@@ -465,13 +465,9 @@ function drawBlock(
       ctx.fillRect(x + eighths(w, 4), y, w - eighths(w, 4), h);
       return;
     case 0x2591: // light shade
-      shade(ctx, x, y, w, h, 1);
-      return;
     case 0x2592: // medium shade
-      shade(ctx, x, y, w, h, 2);
-      return;
     case 0x2593: // dark shade
-      shade(ctx, x, y, w, h, 3);
+      shade(ctx, x, y, w, h, cp);
       return;
     case 0x2594: // upper one eighth
       ctx.fillRect(x, y, w, eighths(h, 1));
@@ -529,17 +525,27 @@ function shade(
   y: number,
   w: number,
   h: number,
-  level: number,
+  cp: number,
 ): void {
   for (let dy = 0; dy < h; dy++) {
     for (let dx = 0; dx < w; dx++) {
-      const on =
-        level === 1
-          ? (dx & 1) === 0 && (dy & 1) === 0
-          : level === 2
-            ? ((dx ^ dy) & 1) === 0
-            : !((dx & 1) === 1 && (dy & 1) === 1);
-      if (on) ctx.fillRect(x + dx, y + dy, 1, 1);
+      if (shadeLit(cp, dx, dy)) ctx.fillRect(x + dx, y + dy, 1, 1);
     }
   }
 }
+
+/**
+ * Whether the shade `cp` lights the pixel at (dx, dy) of its cell.
+ *
+ * Exported because a backend that cannot afford a fill per lit pixel has to
+ * build the same lattice some cheaper way, and two copies of the predicate
+ * would be two different shades.
+ */
+export function shadeLit(cp: number, dx: number, dy: number): boolean {
+  if (cp === 0x2591) return (dx & 1) === 0 && (dy & 1) === 0;
+  if (cp === 0x2592) return ((dx ^ dy) & 1) === 0;
+  return !((dx & 1) === 1 && (dy & 1) === 1);
+}
+
+/** The period of the shade lattice, in pixels, on both axes. */
+export const SHADE_PERIOD = 2;
