@@ -20,6 +20,7 @@ interface RenderStats {
   drawCalls: number;
   atlasUploads: number;
   full: boolean;
+  skipped: boolean;
   cpuMs: number;
 }
 
@@ -55,7 +56,7 @@ test('renders every golden scenario without error', async ({ page }) => {
 // `blocks` is here because the sprite path draws those cells twice over, once
 // into the atlas slot and once straight onto the 2D canvas, and the two
 // drawings have to agree pixel for pixel like every other glyph does.
-for (const scenario of ['ascii', 'cjk', 'blank', 'churn', 'blocks']) {
+for (const scenario of ['ascii', 'cjk', 'blank', 'churn', 'blocks', 'partial']) {
   test(`pixel parity with the Canvas2D reference: ${scenario}`, async ({ page }) => {
     const diff = await page.evaluate(
       (n) => (window as any).harness.compareScenario(n, 40),
@@ -71,6 +72,42 @@ for (const scenario of ['ascii', 'cjk', 'blank', 'churn', 'blocks']) {
     ).toBeLessThan(0.02);
   });
 }
+
+// The failure mode damage tracking creates is a row that should have been
+// redrawn and was not, which leaves the previous frame's pixels standing in a
+// row nothing looks at. Only a whole-surface diff against a full rebuild sees
+// it, so that is what this asserts, on both backends.
+for (const backend of ['webgl2', 'canvas2d'] as const) {
+  test(`partial updates stay identical to a full rebuild: ${backend}`, async ({ page }) => {
+    const r = await page.evaluate(
+      (b) => (window as any).harness.partialUpdateEquivalence(b),
+      backend,
+    );
+
+    // Controls first. Agreement is only worth anything if the thing being
+    // compared is a real screen and if the comparison can fail at all.
+    expect(r.distinctColours, 'reference framebuffer is not a flat fill').toBeGreaterThan(50);
+    expect(r.inkFraction, 'reference framebuffer carries glyphs').toBeGreaterThan(0.01);
+    expect(r.offDiffering, 'negative control: a different state must differ').toBeGreaterThan(0);
+
+    // The first frame is full; every later frame must have rebuilt only the
+    // rows that changed, or the scenario is not exercising the damage path.
+    expect(Math.max(...r.dirtyRows.slice(1))).toBeLessThan(10);
+
+    expect(
+      r.differing,
+      `${backend}: ${r.differing}/${r.total} px stale (max channel delta ${r.maxChannelDelta})`,
+    ).toBe(0);
+  });
+}
+
+test('a frame that changes nothing does not reissue its draws', async ({ page }) => {
+  const r = await page.evaluate(() => (window as any).harness.partialUpdateEquivalence('webgl2'));
+  // Frame 4 of the run leaves the source untouched, so exactly that frame is
+  // the one with nothing to draw. If this ever reaches zero the redundant-frame
+  // skip has stopped firing and the GPU is repainting an unchanged grid.
+  expect(r.skipped).toBe(1);
+});
 
 test('pixel parity on emoji and ZWJ clusters', async ({ page }) => {
   // Colored glyphs go through the untinted atlas path, which is the one place
@@ -107,8 +144,17 @@ test('uploads are damage driven: clean frames re-upload nothing', async ({ page 
   expect(clean.dirtyRows, 'no dirty rows when nothing changed').toBe(0);
   expect(oneRow.dirtyRows, 'a single changed row reports one dirty row').toBe(1);
   expect(twoRows.dirtyRows, 'two changed rows coalesce into one run').toBe(2);
-  // Draw calls stay constant regardless of how much was damaged.
-  expect(new Set(stats.map((s) => s.drawCalls)).size).toBe(1);
+
+  // A frame with nothing to say leaves the last one standing rather than
+  // repainting an identical grid.
+  expect(clean.skipped, 'the clean frame issues no draws').toBe(true);
+  expect(clean.drawCalls).toBe(0);
+
+  // Among the frames that did draw, the count stays constant regardless of how
+  // much was damaged: that is the property the instanced design buys.
+  const drew = stats.filter((s) => !s.skipped);
+  expect(drew.length).toBe(3);
+  expect(new Set(drew.map((s) => s.drawCalls)).size).toBe(1);
 });
 
 test('scrolling rebuilds only the rows that entered the viewport', async ({ page }) => {

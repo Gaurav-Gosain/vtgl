@@ -69,6 +69,25 @@ interface Harness {
     backend: 'webgl2' | 'canvas2d',
     shaped?: boolean,
   ): ScrollCaseResult[];
+  /**
+   * Drive the partial-update scenario incrementally and diff the whole surface
+   * against a full rebuild of the same final state. Carries its own controls:
+   * a negative case that must disagree, and a distinct-colour and ink floor on
+   * the reference, so an agreement over two empty readbacks cannot pass.
+   */
+  partialUpdateEquivalence(
+    backend: 'webgl2' | 'canvas2d',
+    frames?: number,
+  ): {
+    differing: number;
+    total: number;
+    maxChannelDelta: number;
+    offDiffering: number;
+    distinctColours: number;
+    inkFraction: number;
+    skipped: number;
+    dirtyRows: number[];
+  };
   /** Ink on a blinking cell sampled across a blink period, in real pixels. */
   blinkProbe(backend: 'webgl2' | 'canvas2d'): Promise<{ inked: number; blank: number }>;
   atlasProbe(): { first: number; second: number; afterNewGlyph: number };
@@ -919,6 +938,82 @@ const harness: Harness = {
 
   scrollEquivalence(backend, shaped = false) {
     return SCROLL_CASES.map((c) => runScrollCase(backend, c, shaped));
+  },
+
+  partialUpdateEquivalence(backend, frames = 12) {
+    const sc = scenarioByName('partial')!;
+
+    // Incremental: one full first frame, then only the rows step() touches.
+    // Frame 4 is left completely untouched so the redundant-frame skip fires
+    // inside the run rather than only at the end of it.
+    const src = sc.build();
+    const inc = build(backend);
+    const incCanvas = makeCanvas(8, 8);
+    inc.mount(incCanvas);
+    inc.resize(sc.cols, sc.rows, 1);
+    const stats: RenderStats[] = [];
+    inc.on('render', (s) => stats.push(s));
+    inc.render(src, src.scrollbackRows);
+    let last = 0;
+    for (let f = 1; f < frames; f++) {
+      src.clearDirty();
+      if (f !== 4) {
+        sc.step!(src, f);
+        last = f;
+      }
+      inc.render(src, src.scrollbackRows);
+    }
+    const incPixels = readPixels(incCanvas);
+
+    // Reference: a fresh renderer taken straight to the same final state, so
+    // every row is built from scratch and nothing can be stale.
+    const refSrc = sc.build();
+    for (let f = 1; f <= last; f++) sc.step!(refSrc, f);
+    const ref = build(backend);
+    const refCanvas = makeCanvas(8, 8);
+    ref.mount(refCanvas);
+    ref.resize(sc.cols, sc.rows, 1);
+    ref.render(refSrc, refSrc.scrollbackRows);
+    const refPixels = readPixels(refCanvas);
+
+    // Negative control. The same comparison against a state one step further on
+    // must disagree. Without it, "differing == 0" is equally consistent with
+    // both readbacks having returned the same blank buffer.
+    const offSrc = sc.build();
+    for (let f = 1; f <= last + 1; f++) sc.step!(offSrc, f);
+    const off = build(backend);
+    const offCanvas = makeCanvas(8, 8);
+    off.mount(offCanvas);
+    off.resize(sc.cols, sc.rows, 1);
+    off.render(offSrc, offSrc.scrollbackRows);
+    const offDiffering = diff(readPixels(offCanvas), refPixels, 0).differing;
+
+    const d = diff(incPixels, refPixels, 0);
+
+    // Anti-vacuity controls on the reference itself: a comparison over two
+    // cleared buffers agrees perfectly and proves nothing.
+    const px = refPixels.data;
+    const colours = new Set<number>();
+    let ink = 0;
+    for (let i = 0; i < px.length; i += 4) {
+      colours.add((px[i] << 16) | (px[i + 1] << 8) | px[i + 2]);
+      if (px[i] > 0x30 || px[i + 1] > 0x30 || px[i + 2] > 0x30) ink++;
+    }
+
+    inc.dispose();
+    ref.dispose();
+    off.dispose();
+
+    return {
+      differing: d.differing,
+      total: d.total,
+      maxChannelDelta: d.maxChannelDelta,
+      offDiffering,
+      distinctColours: colours.size,
+      inkFraction: ink / (refPixels.width * refPixels.height),
+      skipped: stats.filter((s) => s.skipped).length,
+      dirtyRows: stats.map((s) => s.dirtyRows),
+    };
   },
 
   async blinkProbe(backend) {

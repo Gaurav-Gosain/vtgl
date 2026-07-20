@@ -151,6 +151,17 @@ export class WebGL2Renderer implements Renderer {
   private curShape: CursorShape = 'block';
   private curGlyphRect: AtlasRect | null = null;
 
+  // The same cursor state as it stood at the end of the last frame that
+  // actually drew. A cursor that moves, changes shape, hides, or comes to sit
+  // over a different glyph changes the picture without dirtying any row, so an
+  // otherwise-clean frame has to compare against this before it skips.
+  private hasDrawn = false;
+  private drawnCurVisible = false;
+  private drawnCurVr = -1;
+  private drawnCurX = -1;
+  private drawnCurShape: CursorShape = 'block';
+  private drawnCurGlyph = -1;
+
   private readonly onLost = (e: Event): void => {
     e.preventDefault();
     this.lost = true;
@@ -221,6 +232,10 @@ export class WebGL2Renderer implements Renderer {
 
   setTheme(theme: Theme): void {
     this.theme = theme;
+    this.forceFull = true;
+  }
+
+  invalidate(): void {
     this.forceFull = true;
   }
 
@@ -301,8 +316,32 @@ export class WebGL2Renderer implements Renderer {
     if (wasFull) this.slotBase = 0;
 
     const { full, dirtyRows, glyphs } = this.buildFrame(source, viewportY, wasFull);
-    this.uploadInstances(full);
-    const drawCalls = this.draw();
+
+    // A frame that changes nothing the GPU can see does not need its draws
+    // reissued. The instance buffers already hold the whole grid and the
+    // compositor still holds the last swap, so the screen keeps showing exactly
+    // what the skipped draws would have produced, and the next frame that does
+    // draw reproduces it from the same buffers. Three things move without any
+    // row going dirty and each vetoes the skip: a scroll (it rotates slotBase),
+    // a blinking cell (the glyph shader animates it against u_time), and the
+    // cursor. An atlas upload does too, since it repoints texels the standing
+    // instances already reference.
+    const redundant =
+      !full &&
+      this.hasDrawn &&
+      dirtyRows === 0 &&
+      this.scrolled === 0 &&
+      atlas.uploads === 0 &&
+      this.buffers.blinkCount === 0 &&
+      this.cursorMatchesDrawn();
+
+    let drawCalls = 0;
+    if (!redundant) {
+      this.uploadInstances(full);
+      drawCalls = this.draw();
+      this.snapshotCursor();
+      this.hasDrawn = true;
+    }
 
     const stats: RenderStats = {
       dirtyRows,
@@ -310,6 +349,7 @@ export class WebGL2Renderer implements Renderer {
       drawCalls,
       atlasUploads: atlas.uploads,
       full,
+      skipped: redundant,
       cpuMs: now() - t0,
     };
     this.emitter.emit('render', stats);
@@ -437,6 +477,45 @@ export class WebGL2Renderer implements Renderer {
       w,
       shapedHere ? plan.hintFor(cur.x) : undefined,
     );
+  }
+
+  /**
+   * Scalar signature of the glyph the block cursor is currently overpainting.
+   * Compared rather than the rect itself because the atlas is free to hand back
+   * a fresh object for the same glyph; what matters is where in the atlas the
+   * texels sit and how they are read, not the identity of the wrapper.
+   */
+  private cursorGlyphSig(): number {
+    const r = this.curGlyphRect;
+    if (!r) return -1;
+    let h = 2166136261;
+    h = Math.imul(h ^ r.x, 16777619);
+    h = Math.imul(h ^ r.y, 16777619);
+    h = Math.imul(h ^ r.w, 16777619);
+    h = Math.imul(h ^ r.h, 16777619);
+    h = Math.imul(h ^ r.page, 16777619);
+    h = Math.imul(h ^ (r.colored ? 1 : 0), 16777619);
+    return h >>> 0;
+  }
+
+  /** True when the cursor would draw exactly as it drew on the last real frame. */
+  private cursorMatchesDrawn(): boolean {
+    if (this.curVisible !== this.drawnCurVisible) return false;
+    if (!this.curVisible) return true;
+    return (
+      this.curVr === this.drawnCurVr &&
+      this.curX === this.drawnCurX &&
+      this.curShape === this.drawnCurShape &&
+      this.cursorGlyphSig() === this.drawnCurGlyph
+    );
+  }
+
+  private snapshotCursor(): void {
+    this.drawnCurVisible = this.curVisible;
+    this.drawnCurVr = this.curVr;
+    this.drawnCurX = this.curX;
+    this.drawnCurShape = this.curShape;
+    this.drawnCurGlyph = this.cursorGlyphSig();
   }
 
   // --- GPU upload ---------------------------------------------------------
