@@ -52,7 +52,10 @@ test('renders every golden scenario without error', async ({ page }) => {
 
 // --- the correctness bar -------------------------------------------------
 
-for (const scenario of ['ascii', 'cjk', 'blank', 'churn']) {
+// `blocks` is here because the sprite path draws those cells twice over, once
+// into the atlas slot and once straight onto the 2D canvas, and the two
+// drawings have to agree pixel for pixel like every other glyph does.
+for (const scenario of ['ascii', 'cjk', 'blank', 'churn', 'blocks']) {
   test(`pixel parity with the Canvas2D reference: ${scenario}`, async ({ page }) => {
     const diff = await page.evaluate(
       (n) => (window as any).harness.compareScenario(n, 40),

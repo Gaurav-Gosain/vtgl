@@ -15,6 +15,12 @@
 import { CellFlags } from '../types.ts';
 import { Emitter } from '../events.ts';
 import { toCss } from '../color.ts';
+import {
+  SHADE_PERIOD,
+  drawBoxGlyph,
+  isBoxDrawingGrapheme,
+  shadeLit,
+} from './box-drawing.ts';
 import { computeCellMetrics, measureFont } from './metrics.ts';
 import { RenderScheduler } from './scheduler.ts';
 import { RowShaper } from './runs.ts';
@@ -40,6 +46,11 @@ const DEFAULT_LINE_HEIGHT = 1.2;
 const FONT_CACHE_LIMIT = 8;
 const FILL_CACHE_LIMIT = 512;
 const ADVANCE_CACHE_LIMIT = 512;
+const SHADE_CACHE_LIMIT = 64;
+
+/** The three shades, the only sprites drawn through a cached repeating fill. */
+const FIRST_SHADE = 0x2591;
+const LAST_SHADE = 0x2593;
 
 export class Canvas2DRenderer implements Renderer {
   readonly backend: RendererBackend = 'canvas2d';
@@ -89,6 +100,18 @@ export class Canvas2DRenderer implements Renderer {
   private readonly fontCache = new Map<number, string>();
   private readonly fillCache = new Map<number, string>();
   private readonly advanceCache = new Map<string, number>();
+  // Repeating fills for the three shades, by codepoint and then by foreground.
+  // A shade is an ordered dither, so drawing it straight costs one fill per lit
+  // pixel, and a screen of shades is six figures of fills a frame; the WebGL
+  // path pays that once into an atlas slot, and a pattern is how the 2D path
+  // pays it once too. Nested rather than keyed by a composite so a lookup on
+  // the draw path builds no key.
+  //
+  // The inner value holds one pattern per lattice phase. A pattern repeats from
+  // the canvas origin but the dither is defined from the CELL origin, so a cell
+  // at an odd device-pixel offset needs the lattice shifted; the period is two,
+  // so four prebuilt phases cover every cell and nothing is allocated per cell.
+  private readonly shadeCache = new Map<number, Map<string, (CanvasPattern | null)[]>>();
 
   constructor(options: RendererOptions) {
     this.opts = {
@@ -140,6 +163,7 @@ export class Canvas2DRenderer implements Renderer {
     this.fontCache.clear();
     this.fillCache.clear();
     this.advanceCache.clear();
+    this.shadeCache.clear();
     this.ctx = null;
     this.canvas = null;
   }
@@ -322,7 +346,7 @@ export class Canvas2DRenderer implements Renderer {
         const alpha = flags & CellFlags.FAINT ? 0.5 : 1;
         if (alpha !== 1) ctx.globalAlpha = alpha;
         ctx.fillStyle = this.fill(fg);
-        this.fillGlyph(ctx, grapheme, x, y + this.baseline, shaped, isShaped ? col : -1);
+        this.fillGlyph(ctx, grapheme, x, y, span, shaped, isShaped ? col : -1);
         if (alpha !== 1) ctx.globalAlpha = 1;
         glyphs++;
       }
@@ -345,19 +369,39 @@ export class Canvas2DRenderer implements Renderer {
   }
 
   /**
-   * Draw one cluster. The unshaped path is a plain fillText, unchanged. The
-   * shaped path has to reproduce the decisions GlyphAtlas.raster makes, because
-   * the two backends are held to drawing the same picture: same RTL context,
-   * same advance fitted to the cell, same left-aligned origin.
+   * Draw one cluster over the cell whose top-left corner is (x, y). The
+   * unshaped path is a plain fillText, unchanged. The shaped path has to
+   * reproduce the decisions GlyphAtlas.raster makes, because the two backends
+   * are held to drawing the same picture: same RTL context, same advance fitted
+   * to the cell, same left-aligned origin.
    */
   private fillGlyph(
     ctx: Ctx2D,
     cluster: string,
     x: number,
-    baselineY: number,
+    y: number,
+    span: number,
     shaped: RowShaper | undefined,
     col: number,
   ): void {
+    // Box and block characters are drawn from the cell rectangle rather than
+    // looked up in the face, so that adjacent cells abut. The WebGL2 path does
+    // the same thing into the atlas slot; see renderer/box-drawing.ts.
+    if (col < 0 && isBoxDrawingGrapheme(cluster)) {
+      const cp = cluster.charCodeAt(0);
+      if (cp >= FIRST_SHADE && cp <= LAST_SHADE) {
+        const color = ctx.fillStyle as string;
+        const pattern = this.shadePattern(ctx, cp, color, x, y);
+        if (pattern) {
+          ctx.fillStyle = pattern;
+          ctx.fillRect(x, y, span, this.cellH);
+          ctx.fillStyle = color;
+          return;
+        }
+      }
+      if (drawBoxGlyph(ctx, cp, x, y, span, this.cellH)) return;
+    }
+    const baselineY = y + this.baseline;
     if (col < 0 || shaped === undefined) {
       ctx.fillText(cluster, x, baselineY);
       return;
@@ -378,6 +422,57 @@ export class Canvas2DRenderer implements Renderer {
       ctx.fillText(cluster, dx, baselineY);
     }
     ctx.direction = 'ltr';
+  }
+
+  /**
+   * A repeating fill for one shade in one colour, phased so its lattice lines
+   * up with the cell at (x, y) rather than with the canvas origin. Null when
+   * the environment cannot build one, in which case the caller falls back to
+   * drawing the dither a pixel at a time.
+   */
+  private shadePattern(
+    ctx: Ctx2D,
+    cp: number,
+    color: string,
+    x: number,
+    y: number,
+  ): CanvasPattern | null {
+    let byColor = this.shadeCache.get(cp);
+    if (byColor === undefined) {
+      byColor = new Map();
+      this.shadeCache.set(cp, byColor);
+    }
+    let phases = byColor.get(color);
+    if (phases === undefined) {
+      if (byColor.size >= SHADE_CACHE_LIMIT) byColor.clear();
+      phases = new Array<CanvasPattern | null>(SHADE_PERIOD * SHADE_PERIOD).fill(null);
+      byColor.set(color, phases);
+    }
+    const px = x % SHADE_PERIOD;
+    const py = y % SHADE_PERIOD;
+    const slot = py * SHADE_PERIOD + px;
+    const hit = phases[slot];
+    if (hit !== null) return hit;
+
+    const tile = typeof ctx.createPattern === 'function'
+      ? makeSurface(SHADE_PERIOD, SHADE_PERIOD)
+      : null;
+    if (tile === null) return null;
+    const tctx = tile.getContext('2d') as Ctx2D | null;
+    if (!tctx) return null;
+    tctx.fillStyle = color;
+    for (let j = 0; j < SHADE_PERIOD; j++) {
+      for (let i = 0; i < SHADE_PERIOD; i++) {
+        // Tile pixel (i, j) sits at cell offset (i - px, j - py), which is what
+        // shifts the lattice onto this cell.
+        const dx = (i - px + SHADE_PERIOD) % SHADE_PERIOD;
+        const dy = (j - py + SHADE_PERIOD) % SHADE_PERIOD;
+        if (shadeLit(cp, dx, dy)) tctx.fillRect(i, j, 1, 1);
+      }
+    }
+    const pattern = ctx.createPattern(tile as CanvasImageSource, 'repeat');
+    phases[slot] = pattern;
+    return pattern;
   }
 
   private drawDecorations(
@@ -437,7 +532,7 @@ export class Canvas2DRenderer implements Renderer {
         if (g.length > 0 && line.codepoint(cur.x) !== 32) {
           ctx.font = this.font(line.flags(cur.x));
           ctx.fillStyle = this.fill(this.theme.cursorText ?? this.theme.background);
-          this.fillGlyph(ctx, g, x, y + this.baseline, plan, shapedHere ? cur.x : -1);
+          this.fillGlyph(ctx, g, x, y, this.cellW, plan, shapedHere ? cur.x : -1);
         }
         break;
       }
@@ -520,6 +615,9 @@ export class Canvas2DRenderer implements Renderer {
     this.fontCache.clear();
     // Advances are in device pixels, so a metrics change invalidates them.
     this.advanceCache.clear();
+    // A shade pattern is phased against its cell's device-pixel origin, so
+    // new cell dimensions put every cached phase on the wrong lattice.
+    this.shadeCache.clear();
   }
 
   private applyBackingStore(): void {
@@ -587,6 +685,26 @@ function cursorStateKey(cur: CursorState): number {
 function blinkPhase(): boolean {
   const t = now() / 500;
   return t - Math.floor(t) >= 0.5;
+}
+
+/**
+ * An offscreen drawing surface of the given size, or null when neither an
+ * OffscreenCanvas nor a document is available (the recording canvas the unit
+ * tests mount is neither).
+ */
+function makeSurface(w: number, h: number): HTMLCanvasElement | OffscreenCanvas | null {
+  const g = globalThis as {
+    OffscreenCanvas?: new (w: number, h: number) => OffscreenCanvas;
+    document?: Document;
+  };
+  if (g.OffscreenCanvas) return new g.OffscreenCanvas(w, h);
+  if (g.document) {
+    const c = g.document.createElement('canvas');
+    c.width = w;
+    c.height = h;
+    return c;
+  }
+  return null;
 }
 
 function globalDpr(): number {

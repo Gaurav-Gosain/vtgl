@@ -11,6 +11,7 @@
 
 import { AtlasPacker } from './packer.ts';
 import { atlasKey } from './key.ts';
+import { drawBoxGlyph, isBoxDrawingGrapheme } from '../renderer/box-drawing.ts';
 import type { AtlasRect, GlyphProvider, RasterHint } from '../renderer/instances.ts';
 
 type Ctx2D = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
@@ -84,7 +85,12 @@ export class GlyphAtlas implements GlyphProvider {
     // A shaped glyph carries its own key: the same grapheme rastered with a
     // joining context or a fitted advance is a different picture, and the
     // shaper's key is what keeps the two from sharing a slot.
-    const key = hint ? hint.key : atlasKey(grapheme, styleMask);
+    // A box or block sprite is the same picture whatever the style mask says:
+    // it is drawn from the cell rectangle, not from a face, so bold and italic
+    // have nothing to change. Keying it at mask 0 keeps the four style
+    // variants of a border character in one slot instead of four.
+    const sprite = hint === undefined && isBoxDrawingGrapheme(grapheme);
+    const key = hint ? hint.key : atlasKey(grapheme, sprite ? 0 : styleMask);
     const res = this.packer.alloc(key, slotW, slotH, false);
     if (res === null) return null;
     if (res.isNew) {
@@ -134,6 +140,19 @@ export class GlyphAtlas implements GlyphProvider {
   ): boolean {
     const ctx = this.font.ctx;
     ctx.clearRect(0, 0, slotW, slotH);
+
+    // Box-drawing and block elements are drawn to the slot rectangle rather
+    // than rastered from the face. The slot is exactly the cell and the glyph
+    // quad is exactly the cell, so a sprite that fills the slot edge to edge
+    // meets its neighbour with nothing in between. See renderer/box-drawing.ts.
+    if (hint === undefined && isBoxDrawingGrapheme(grapheme)) {
+      ctx.fillStyle = '#ffffff';
+      if (drawBoxGlyph(ctx, grapheme.charCodeAt(0), 0, 0, slotW, slotH)) {
+        this.upload(slotW, slotH, page, x, y);
+        return false;
+      }
+    }
+
     ctx.font = this.font.fontFor(styleMask);
     ctx.textBaseline = 'alphabetic';
     // Both are set on every raster rather than once at setup: the context is
@@ -157,9 +176,18 @@ export class GlyphAtlas implements GlyphProvider {
       ctx.fillText(grapheme, 0, this.font.baseline);
     }
 
-    const img = ctx.getImageData(0, 0, slotW, slotH);
-    const colored = detectColored(img.data);
+    return detectColored(this.upload(slotW, slotH, page, x, y));
+  }
 
+  /** Push the scratch context's current contents into a slot, and hand back the pixels. */
+  private upload(
+    slotW: number,
+    slotH: number,
+    page: number,
+    x: number,
+    y: number,
+  ): Uint8ClampedArray {
+    const img = this.font.ctx.getImageData(0, 0, slotW, slotH);
     const gl = this.gl;
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.tex);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
@@ -178,7 +206,7 @@ export class GlyphAtlas implements GlyphProvider {
       img.data,
     );
     this.uploadsThisFrame++;
-    return colored;
+    return img.data;
   }
 }
 

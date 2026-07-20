@@ -123,6 +123,43 @@ them into one loose threshold, which is why those entries are excluded from the
 ink-ratio comparison. It does mean the backends are not interchangeable
 pixel-for-pixel on emoji-dense content.
 
+### The shades cost the 2D path what a font glyph did not
+
+U+2500..U+259F is not rastered from the face. A font glyph is drawn into a
+cell-sized box at whatever size and position the face asks for, so two stacked
+block cells do not meet: measured on Noto Sans Mono at a 14px font and dpr 1,
+U+2588's ink stopped 4 device pixels short of the top of its cell and 3 short of
+the bottom, which is a 7 pixel band of background between two stacked full
+blocks and up to 14 at dpr 2. Every tiling pattern in the range failed the same
+way on both backends, at every device pixel ratio and font size tried. The range
+is drawn from the cell rectangle instead, and the seam is now zero.
+
+What that costs is not uniform:
+
+- On the WebGL2 path, nothing. A sprite is drawn into its atlas slot once and
+  cached like any other glyph, so a steady-state frame of nothing but box
+  characters measured 1.06 ms against 1.12 ms, which is inside the run to run
+  spread.
+- On the Canvas2D path it is a saving on everything except the three shades. A
+  screen of box characters with the shades left out measured 2.36 ms of render
+  CPU against the font path's 4.23 ms, and 5.4 ms of wall time against 7.5 ms.
+- The three shades are an ordered dither on a two-by-two lattice, drawn through
+  a cached repeating fill. A screen that is one third shades measured 4.23 ms of
+  render CPU before and 2.73 ms after, but 7.5 ms of wall time before and 80 ms
+  after, both including a forced readback. A dithered fill is expensive for a
+  software rasterizer in a way a font glyph's antialiased blob is not.
+
+Three ways of drawing the shades were measured and the pattern is the one
+shipped, because it has the lowest cost inside `render()` and that is the figure
+that blocks a host's main thread. Filling one pixel at a time measured 51 ms of
+render CPU; blitting a cached cell-sized bitmap measured 5.3 ms of render CPU
+and 128 ms of wall time. Whether a GPU-composited 2D canvas closes the wall-time
+gap is not measured here and is not claimed; the benchmark environment
+rasterizes both backends on the CPU.
+
+An alpha-blended flat fill would cost one rectangle per cell and sidestep all of
+this, and it is not what a terminal draws.
+
 ### Declared and inert
 
 Most of what used to be listed here is gone. `Theme.selection`, `Theme.palette`,
