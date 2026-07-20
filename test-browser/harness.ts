@@ -136,6 +136,30 @@ interface Harness {
     /** Configure the Arabic shaper, so its cost can be measured against not having it. */
     shaped?: boolean,
   ): BenchResult;
+  /**
+   * Fill a grid with a repeating pattern of box/block characters and report how
+   * much of each pixel row and column is at full foreground. `grid` is one
+   * string per cell row, repeated across the row's columns. A seam shows up as a
+   * pixel row or column at a cell boundary carrying less than the rows or
+   * columns inside the cell.
+   */
+  seamProbe(
+    backend: 'webgl2' | 'canvas2d',
+    grid: string[],
+    cols: number,
+    rows: number,
+    dpr: number,
+    fontSize: number,
+  ): SeamProfile;
+  /** The same grid as a PNG data URL, for looking at it. */
+  seamPng(
+    backend: 'webgl2' | 'canvas2d',
+    grid: string[],
+    cols: number,
+    rows: number,
+    dpr: number,
+    fontSize: number,
+  ): string;
 }
 
 /**
@@ -186,6 +210,20 @@ export interface AllocResult {
   frames: number;
   /** Glyphs drawn per frame, so bytes/glyph can be reasoned about. */
   glyphs: number;
+}
+
+export interface SeamProfile {
+  cellW: number;
+  cellH: number;
+  width: number;
+  height: number;
+  /**
+   * Full-foreground coverage, one string per pixel row, '1' covered and '0'
+   * not. A mask rather than per-row totals because a seam is a local property
+   * of one boundary and the interesting patterns only tile over part of the
+   * frame, so the caller has to be able to ask about a sub-rectangle.
+   */
+  mask: string[];
 }
 
 interface BenchResult {
@@ -475,6 +513,58 @@ function readPixels(canvas: HTMLCanvasElement): ImageData {
   const ctx = scratch.getContext('2d', { willReadFrequently: true })!;
   ctx.drawImage(canvas, 0, 0);
   return ctx.getImageData(0, 0, canvas.width, canvas.height);
+}
+
+// --- box/block seam probe --------------------------------------------------
+//
+// Two stacked box or block cells share an edge: the bottom pixel row of the
+// upper cell and the top pixel row of the lower one are adjacent on screen, so
+// anything short of full coverage on either side of that edge reads as a
+// hairline gap running across the screen. The probe fills a grid with one
+// pattern, reads the frame back, and reports full-foreground coverage per pixel
+// row and per pixel column, which is what a caller compares across a boundary.
+//
+// White on black, so "covered" is unambiguous and a partially covered pixel
+// left by antialiasing is not counted as covered.
+
+const SEAM_FG = 0xffffff;
+const SEAM_BG = 0x000000;
+const SEAM_THEME: Theme = { foreground: SEAM_FG, background: SEAM_BG, cursor: SEAM_FG };
+
+/** Render a repeating box/block grid and hand back the canvas it drew on. */
+function renderSeamGrid(
+  backend: 'webgl2' | 'canvas2d',
+  grid: string[],
+  cols: number,
+  rows: number,
+  dpr: number,
+  fontSize: number,
+): { canvas: HTMLCanvasElement; renderer: Renderer } {
+  const source = new FakeSource({ cols, rows, fg: SEAM_FG, bg: SEAM_BG });
+  source.setCursor({ visible: false });
+  for (let r = 0; r < rows; r++) {
+    const chars = [...grid[r % grid.length]];
+    for (let c = 0; c < cols; c++) {
+      const cp = chars[c % chars.length].codePointAt(0)!;
+      source.setCell(r, c, cp, { width: 1, fg: SEAM_FG, bg: SEAM_BG });
+    }
+  }
+  const renderer = build(backend, {
+    ...BASE_OPTIONS,
+    fontSize,
+    dpr,
+    theme: SEAM_THEME,
+  });
+  const canvas = makeCanvas(8, 8);
+  renderer.mount(canvas);
+  renderer.resize(cols, rows, dpr);
+  renderer.render(source, 0);
+  return { canvas, renderer };
+}
+
+/** True when a pixel is at (or within rounding of) the full foreground colour. */
+function isCovered(d: Uint8ClampedArray, i: number): boolean {
+  return d[i] >= 0xf0 && d[i + 1] >= 0xf0 && d[i + 2] >= 0xf0;
 }
 
 // --- scroll fast path vs forced full rebuild -------------------------------
@@ -1172,6 +1262,40 @@ const harness: Harness = {
     };
     renderer.dispose();
     return result;
+  },
+
+  seamProbe(backend, grid, cols, rows, dpr, fontSize) {
+    const { canvas, renderer } = renderSeamGrid(backend, grid, cols, rows, dpr, fontSize);
+    const px = readPixels(canvas);
+    const m = renderer.getMetrics();
+    const d = px.data;
+    const mask: string[] = [];
+    for (let y = 0; y < px.height; y++) {
+      let row = '';
+      for (let x = 0; x < px.width; x++) {
+        row += isCovered(d, (y * px.width + x) * 4) ? '1' : '0';
+      }
+      mask.push(row);
+    }
+    renderer.dispose();
+    return {
+      cellW: m.cellWidth,
+      cellH: m.cellHeight,
+      width: px.width,
+      height: px.height,
+      mask,
+    };
+  },
+
+  seamPng(backend, grid, cols, rows, dpr, fontSize) {
+    const { canvas, renderer } = renderSeamGrid(backend, grid, cols, rows, dpr, fontSize);
+    const px = readPixels(canvas);
+    const out = document.createElement('canvas');
+    out.width = px.width;
+    out.height = px.height;
+    out.getContext('2d')!.putImageData(px, 0, 0);
+    renderer.dispose();
+    return out.toDataURL('image/png');
   },
 
   drawCallScaling() {

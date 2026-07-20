@@ -15,6 +15,7 @@
 import { CellFlags } from '../types.ts';
 import { Emitter } from '../events.ts';
 import { toCss } from '../color.ts';
+import { drawBoxGlyph, isBoxDrawingGrapheme } from './box-drawing.ts';
 import { computeCellMetrics, measureFont } from './metrics.ts';
 import { RenderScheduler } from './scheduler.ts';
 import { RowShaper } from './runs.ts';
@@ -322,7 +323,7 @@ export class Canvas2DRenderer implements Renderer {
         const alpha = flags & CellFlags.FAINT ? 0.5 : 1;
         if (alpha !== 1) ctx.globalAlpha = alpha;
         ctx.fillStyle = this.fill(fg);
-        this.fillGlyph(ctx, grapheme, x, y + this.baseline, shaped, isShaped ? col : -1);
+        this.fillGlyph(ctx, grapheme, x, y, span, shaped, isShaped ? col : -1);
         if (alpha !== 1) ctx.globalAlpha = 1;
         glyphs++;
       }
@@ -345,19 +346,28 @@ export class Canvas2DRenderer implements Renderer {
   }
 
   /**
-   * Draw one cluster. The unshaped path is a plain fillText, unchanged. The
-   * shaped path has to reproduce the decisions GlyphAtlas.raster makes, because
-   * the two backends are held to drawing the same picture: same RTL context,
-   * same advance fitted to the cell, same left-aligned origin.
+   * Draw one cluster over the cell whose top-left corner is (x, y). The
+   * unshaped path is a plain fillText, unchanged. The shaped path has to
+   * reproduce the decisions GlyphAtlas.raster makes, because the two backends
+   * are held to drawing the same picture: same RTL context, same advance fitted
+   * to the cell, same left-aligned origin.
    */
   private fillGlyph(
     ctx: Ctx2D,
     cluster: string,
     x: number,
-    baselineY: number,
+    y: number,
+    span: number,
     shaped: RowShaper | undefined,
     col: number,
   ): void {
+    // Box and block characters are drawn from the cell rectangle rather than
+    // looked up in the face, so that adjacent cells abut. The WebGL2 path does
+    // the same thing into the atlas slot; see renderer/box-drawing.ts.
+    if (col < 0 && isBoxDrawingGrapheme(cluster)) {
+      if (drawBoxGlyph(ctx, cluster.charCodeAt(0), x, y, span, this.cellH)) return;
+    }
+    const baselineY = y + this.baseline;
     if (col < 0 || shaped === undefined) {
       ctx.fillText(cluster, x, baselineY);
       return;
@@ -437,7 +447,7 @@ export class Canvas2DRenderer implements Renderer {
         if (g.length > 0 && line.codepoint(cur.x) !== 32) {
           ctx.font = this.font(line.flags(cur.x));
           ctx.fillStyle = this.fill(this.theme.cursorText ?? this.theme.background);
-          this.fillGlyph(ctx, g, x, y + this.baseline, plan, shapedHere ? cur.x : -1);
+          this.fillGlyph(ctx, g, x, y, this.cellW, plan, shapedHere ? cur.x : -1);
         }
         break;
       }

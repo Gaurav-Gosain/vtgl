@@ -134,6 +134,41 @@ export const emojiScenario: Scenario = {
   },
 };
 
+/**
+ * A screen made entirely of box-drawing and block elements: the worst case for
+ * the sprite path, since every cell is drawn from geometry rather than looked
+ * up in the font. Real screens are nothing like this, which is the point: it
+ * bounds what the sprites can cost.
+ */
+export const blocksScenario: Scenario = {
+  name: 'blocks',
+  damage: 'static',
+  description: 'Every cell a box or block element, 120x40, static after first paint.',
+  cols: COLS,
+  rows: ROWS,
+  build() {
+    const s = new FakeSource({ cols: COLS, rows: ROWS, fg: FG, bg: BG });
+    // Rules and junctions, then the solid families, then the shades: a row of
+    // each so no one shape dominates the cost.
+    const bands = [
+      '─│┌┐└┘├┤┬┴┼━┃┏┓┗┛┣┫┳┻╋═║╔╗╚╝╠╣╦╩╬╭╮╯╰╱╲╳',
+      '█▀▄▌▐▁▂▃▄▅▆▇█▉▊▋▌▍▎▏▔▕▖▗▘▙▚▛▜▝▞▟',
+      '░▒▓█░▒▓█░▒▓█░▒▓█',
+    ];
+    for (let r = 0; r < ROWS; r++) {
+      const band = [...bands[r % bands.length]];
+      for (let c = 0; c < COLS; c++) {
+        s.setCell(s.activeTop + r, c, band[(c + r) % band.length].codePointAt(0)!, {
+          width: 1,
+          fg: FG,
+          bg: BG,
+        });
+      }
+    }
+    return s;
+  },
+};
+
 /** Mostly blank screen with a little text: exercises the blank-cell fast skip. */
 export const blankScenario: Scenario = {
   name: 'blank',
@@ -408,6 +443,7 @@ export const scenarios: Scenario[] = [
   cjkScenario,
   emojiScenario,
   arabicScenario,
+  blocksScenario,
   blankScenario,
   churnScenario,
 ];
