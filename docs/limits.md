@@ -15,14 +15,29 @@ What it does. A grapheme-aware VT puts one Arabic letter in each cell (the
 torture corpus records that as the `split` layout, measured against a real
 ghostty-vt buffer). The shaper groups contiguous Arabic cells of uniform style
 into a run, derives each letter's joining context from the Unicode joining
-types, and rasters it with a zero-width joiner on whichever side joins, so the
-browser's own text engine returns the initial, medial, final or isolated form.
-The run's cells are then laid out right to left, and each glyph's advance is
-scaled to its cell so the connecting strokes meet on the cell boundary.
+types, and maps the base letter plus that context to its Arabic Presentation
+Forms-B code point (U+FE70..U+FEFF), which encodes the initial, medial, final
+and isolated forms explicitly. The browser draws the form it is handed. The
+run's cells are then laid out right to left, and each glyph's advance is scaled
+to its cell so the connecting strokes meet on the cell boundary.
 
-No shaping engine is shipped and no dependency was added. The browser was
-already doing the shaping; the renderer was bypassing it by rasterising one
-isolated cell at a time.
+This selects the form itself rather than asking the browser's canvas to resolve
+a zero-width joiner, which is what makes it work on every engine. The joiner
+trick it replaced was measured on Chromium and Firefox: Chromium honoured a
+joiner on either side of a letter, but Firefox honoured only a trailing one and
+dropped a leading one, so a word's medial and final letters came back unjoined
+on Firefox. Selecting the presentation form removes that dependency, and shaped
+Arabic now joins identically on both, verified on screen on real Firefox and
+Chromium.
+
+A letter outside the presentation-form range (Arabic Supplement, Extended-A,
+tatweel, and the few core code points that have no form) still falls back to the
+zero-width joiner, so it joins on Chromium and comes back isolated on Firefox.
+Nothing in the test corpus reaches that path; core Arabic does not.
+
+No shaping engine is shipped and no dependency was added: the presentation forms
+are a fixed table of code points, and the browser rasters each one as an ordinary
+glyph.
 
 The verification is a ground-truth comparison rather than an eyeball. Unicode
 encodes the four joining forms explicitly in Presentation Forms-B, so the
@@ -52,10 +67,13 @@ What it is not:
   character, so it ends the run. Two Arabic words on a line each join correctly
   and each read right to left internally, but the words stay in logical order
   left to right. A full sentence is therefore still not laid out correctly.
-- **No lam-alef ligature.** The VT gave lam and alef a cell each and the renderer
-  draws one glyph per cell, so they come out as lam-initial plus alef-final
-  rather than the single ligature glyph a real shaper produces. The corpus
-  records this as `arabic-lam-alef`.
+- **Lam-alef is the one ligature.** Lam followed by any of the four alef variants
+  is a mandatory ligature. The VT gives lam and alef a cell each; the shaper
+  emits the ligature's own Presentation Forms-B code point (U+FEF5..U+FEFC, final
+  form when the lam joins a letter before it) as a single glyph fitted across the
+  two cells, and blanks the second cell so the lam is not drawn again underneath.
+  The corpus records this as `arabic-lam-alef`. No other ligature is formed:
+  every other cluster is one letter to one cell.
 - **Arabic block only.** The joining table covers U+0600..U+06FF. Syriac, N'Ko,
   Mongolian, Adlam and Thaana join by the same mechanism and would fall out of
   the same code, but their tables are not transcribed and nothing tests them.
@@ -80,15 +98,116 @@ xterm.js does not do contextual shaping at all, so this is now a small edge
 rather than parity. It is not a reason to pick vtgl if you need real bidi, which
 neither has.
 
+### HarfBuzz shaping: correct marks and joins, at a fixed byte cost
+
+`createHarfBuzzShaper()` is a second shaper, opt-in the same way. Where
+`arabicShaper()` selects a precomposed presentation form per cell and leans on
+the browser to draw it, this one runs the real HarfBuzz engine (harfbuzzjs
+1.4.0, HarfBuzz 14.2.1) over each run against a bundled Arabic face (Noto Sans
+Arabic, OFL), gets back glyph ids and positions, and rasters each glyph straight
+from its outline. It is async because HarfBuzz is a wasm module; await it once,
+then pass the result as `RendererOptions.shaper`.
+
+What it earns over the presentation-form path, all verified on screen on real
+Chromium and Firefox:
+
+- **GPOS mark placement.** Dots, hamza and madda are separate glyphs positioned
+  by the font's GPOS table, which precomposed forms cannot express at all. `بببب`
+  comes back as four beh bases each with its dot placed by the shaper, and the
+  four alef variants carry their diacritic where the face asks.
+- **A seam-free WebGL2 join.** Each shaped cluster (a base plus its marks) is
+  composited into one tile that carries its full ink and is sized larger than a
+  cell, and the tile is placed at the HarfBuzz pen position with no per-cell
+  crop. The connecting stroke overhangs freely, so a joined word is one
+  continuous stroke on WebGL2 with none of the per-cell notch the presentation
+  form path leaves there. (The Canvas2D backend already joined cleanly; this
+  makes WebGL2 match it.)
+- **Engine independence by construction.** HarfBuzz does the shaping, not the
+  browser, so Chromium and Firefox cannot diverge on glyph choice or position.
+  Measured on the full test grid: the two engines are within 0.04% of pixels on
+  WebGL2 and 0.005% on Canvas2D, the residual being rasterizer antialiasing.
+
+Architecture is **hybrid**: only runs the shaper claims (the Arabic block, the
+same `isArabic` test the presentation-form shaper uses) go through HarfBuzz.
+Latin, digits, box-drawing, block elements, emoji and every other cell stay on
+the renderer's existing code-point + `fillText` path, untouched. Verified: with
+the HarfBuzz shaper configured, non-Arabic content renders byte-for-byte
+identically to no shaper at all (0 differing pixels, 0 max channel delta). That
+is the hard no-regression guarantee, and it is why the existing golden-parity
+tests did not move: the HarfBuzz path is purely additive behind a new shaper.
+
+The correct long-term design is **shape-everything**: bundle a primary
+monospace face beside this Arabic one, put both in a fallback chain, and route
+every run through HarfBuzz so the browser never shapes anything. That
+generalises to programming ligatures and other complex scripts and removes the
+browser-shaping dependency for the whole grid. It is deferred here because it
+replaces the code-point raster path for all content, which is a larger change
+with real regression surface on the Latin path this hybrid keeps frozen; it
+needs the primary face's bytes bundled too. This is the documented next step.
+
+What it does not do:
+
+- **Not bidi.** As with the presentation-form shaper, HarfBuzz shapes a run in
+  one direction; it does not run the Unicode Bidirectional Algorithm. A run ends
+  at a non-Arabic cell, so word order across a space is still not reversed and a
+  full mixed sentence is not laid out correctly.
+- **Same reordering trade.** A run fills its cells left to right in visual
+  order, so `cellAtPixel` inside a shaped run still names a cell whose character
+  is elsewhere in the run. A host that needs selection to line up with the
+  buffer leaves the shaper off.
+- **One face, regular weight.** The bundled Noto Sans Arabic is regular; bold
+  and italic Arabic are not synthesised. A host may pass its own OFL/embeddable
+  face bytes via `HarfBuzzShaperOptions.fontBytes`.
+- **The run is fit to the grid.** A run is scaled uniformly so its advance fills
+  the cells the VT assigned it, which keeps the row aligned and every join
+  continuous. This is a gentler distortion than the per-cell squeeze the
+  presentation-form path applies, but it is still a horizontal fit: Arabic in a
+  monospace grid is distorted by construction.
+
+**Byte cost (measured, not optimized).** The engine and face are embedded so
+the vendor bundle stays self-contained. Against the pre-HarfBuzz vendor bundle
+(14.7 KB gzip), the HarfBuzz build is 371 KB gzip: about **+357 KB gzip added**.
+That is the wasm (161 KB gz), the full Noto Sans Arabic TTF (98 KB gz), the
+emscripten glue plus wrapper (18.5 KB gz), and roughly 78 KB of base64-inline
+overhead from embedding the binaries in the JS. Deferred size wins, none taken
+here: subset the font (HarfBuzz needs raw sfnt, not WOFF2, but a subset TTF is
+far smaller), load the wasm and font as separately fetched, lazily loaded chunks
+instead of base64 inline (removes the base64 overhead and keeps a Latin-only
+session from paying anything), and `wasm-opt -Oz`.
+
+**Runtime cost (measured on a real GPU, NVIDIA RTX 3070).** Shaping one run
+(`سلام`, four letters) is 7.7 µs steady-state; shaping runs once per changed
+line, so a screenful of Arabic is well under a millisecond. A full-grid redraw
+of the 40x17 test grid with Arabic shaped is 0.18 ms mean CPU in `render()`.
+Glyph rasterisation is per unique cluster tile and amortises into the atlas
+exactly like the code-point path. Neither is a hot-path concern; the fixed byte
+cost is the real trade, and it is deferred.
+
 ### Ligatures, selection, subpixel antialiasing
 
-None are implemented. Ligatures now have the run grouping they need, but nothing
-produces them: a ligature is several cells collapsing into one glyph, and the
-renderer draws one glyph per cell. Selection is a host concern and the type
-surface says so: there is no `Theme.selection`, and a host that wants selection
-draws its own overlay over the canvas. Subpixel antialiasing would need
-foreground baked into the glyph, which is why `atlasKeyBaked` and `quantize`
-exist; nothing calls them.
+The only ligature is Arabic lam-alef, described above: a shaped glyph now carries
+a column span, so a two-cell cluster can collapse into one fitted glyph. No
+general ligature substitution exists, and programming ligatures (a font's `==>`
+or `!=`) are not formed: those are a font-feature question the atlas does not ask
+the face. Selection is a host concern and the type surface says so: there is no
+`Theme.selection`, and a host that wants selection draws its own overlay over the
+canvas. Subpixel antialiasing would need foreground baked into the glyph, which
+is why `atlasKeyBaked` and `quantize` exist; nothing calls them.
+
+### Shaped joins seam on the WebGL2 backend
+
+A shaped run's connecting strokes meet cleanly on the Canvas2D backend and show a
+faint notch at the cell boundary on the WebGL2 one. The cause is the atlas: the
+Canvas2D path draws every glyph of a row onto one surface, so a connecting stroke
+antialiases continuously across the boundary and a glyph's ink is free to overhang
+into the next cell. The WebGL2 path rasters each glyph into its own atlas slot,
+cropped to exactly the cell, and samples the slots as separate quads, so there is
+no antialiasing shared across the boundary and no overhang to fill the seam. The
+notch is small and predates presentation-form selection; it is a property of
+per-cell rasterisation, not of the shaper. Closing it cleanly needs the run
+rastered as one bitmap rather than one slot per cell, which is sub-cell glyph
+positioning and belongs to a real run shaper. A host that needs pixel-clean
+Arabic joins today should use the Canvas2D backend.
 
 ### Blink needs a driver
 

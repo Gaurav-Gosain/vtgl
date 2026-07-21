@@ -15,6 +15,7 @@ import type {
   Renderer,
   RendererOptions,
   RenderStats,
+  ShapedRun,
   ShaperHook,
   Theme,
 } from '../src/types.ts';
@@ -298,16 +299,23 @@ function fitOnlyShaper(): ShaperHook {
   return {
     participates: (cp) => cp >= 0xfe70 && cp <= 0xfeff,
     shapeRun(cells) {
-      return {
-        glyphs: cells.map((cluster, i) => ({
-          atlasKey: 'pf' + cluster,
-          cluster,
-          col: i,
-          xOffset: 0,
-          rtl: false,
-          fitAdvance: true,
-        })),
-      };
+      // A lam-alef ligature form spans two cells the same way the Arabic shaper
+      // emits it, consuming the following filler cell as a blank, so the
+      // reference lands in the columns the shaper's own ligature does.
+      const glyphs: ShapedRun['glyphs'] = [];
+      let col = 0;
+      for (let i = 0; i < cells.length && col < cells.length; i++, col++) {
+        const cluster = cells[i];
+        const cp = cluster.codePointAt(0)!;
+        const lig = cp >= 0xfef5 && cp <= 0xfefc;
+        glyphs.push({ atlasKey: 'pf' + cluster, cluster, col, xOffset: 0, rtl: false, fitAdvance: true, cols: lig ? 2 : 1 });
+        if (lig) {
+          glyphs.push({ atlasKey: 'pfblank', cluster: '', col: col + 1, xOffset: 0, rtl: false, fitAdvance: false });
+          i++;
+          col++;
+        }
+      }
+      return { glyphs };
     },
   };
 }
@@ -320,10 +328,13 @@ function fitOnlyShaper(): ShaperHook {
 function arabicFormRows(backend: 'webgl2' | 'canvas2d'): ImageData[] {
   const WORD = 'سلام';
   // salaam in Presentation Forms-B, already in the visual order a correct
-  // right-to-left layout produces: meem isolated, alef final, lam medial, seen
-  // initial. Alef is right-joining, which is why the meem beside it is isolated
-  // rather than final.
-  const FORMS = ['ﻡ', 'ﺎ', 'ﻠ', 'ﺳ'];
+  // right-to-left layout produces: meem isolated, then the lam-alef ligature in
+  // its final form (the lam joins the seen before it), then seen initial. Lam and
+  // alef collapse into the one mandatory ligature, so it spans two of the four
+  // columns; the third form below is a filler the reference shaper consumes as
+  // that second cell. Alef is right-joining, which is why the meem beside it is
+  // isolated rather than final.
+  const FORMS = ['ﻡ', 'ﻼ', 'ﻼ', 'ﺳ'];
   const cols = WORD.length;
 
   const render = (chars: string[], shaper: RendererOptions['shaper']): ImageData => {

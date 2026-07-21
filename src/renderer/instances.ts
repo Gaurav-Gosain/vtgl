@@ -21,7 +21,7 @@
 import { CellFlags } from '../types.ts';
 import { styleMask } from '../atlas/key.ts';
 import type { RowShaper } from './runs.ts';
-import type { Theme, VtSource } from '../types.ts';
+import type { OutlineGlyph, Theme, VtSource } from '../types.ts';
 
 /** A packed slot in the atlas, as returned by a GlyphProvider. */
 export interface AtlasRect {
@@ -44,6 +44,12 @@ export interface RasterHint {
   rtl: boolean;
   /** Scale horizontally so the cluster's advance equals the slot width. */
   fitAdvance: boolean;
+  /**
+   * When present the glyph is rastered from a font outline (HarfBuzz) into a
+   * full-ink tile rather than through fillText, and `rtl`/`fitAdvance` are
+   * ignored. The atlas slot is the tile, not the cell.
+   */
+  outline?: OutlineGlyph;
 }
 
 /**
@@ -234,10 +240,13 @@ export class InstanceBuffers {
       const grapheme = isShaped ? shaped.cluster(col) : line.grapheme(col);
       if (grapheme.length === 0) continue;
 
+      // A shaped ligature spans the cells the VT gave its two letters, so its
+      // slot and quad are that wide; an unshaped glyph spans its own cell width.
+      const glyphCols = isShaped ? shaped.glyphCols(col) : spanCols;
       const rect = provider.ensure(
         grapheme,
         styleMask(flags),
-        spanCols,
+        glyphCols,
         isShaped ? shaped.hintFor(col) : undefined,
       );
       if (rect === null) continue; // could not place; drawn as blank this frame
@@ -248,8 +257,17 @@ export class InstanceBuffers {
       this.glyphF32[gBase + 1] = rect.y;
       this.glyphF32[gBase + 2] = rect.w;
       this.glyphF32[gBase + 3] = rect.h;
-      this.glyphF32[gBase + 4] = isShaped ? shaped.xOffset(col) : 0; // glyphOff.x
-      this.glyphF32[gBase + 5] = 0; // glyphOff.y
+      // An outline glyph places its tile so the cluster's pen origin lands at
+      // (col*cellW + xOffset, baseline + yOffset); the quad is the tile, which
+      // may overhang the cell. The fillText path keeps its cell-local offset.
+      const outline = isShaped ? shaped!.outline(col) : undefined;
+      if (outline !== undefined) {
+        this.glyphF32[gBase + 4] = shaped!.xOffset(col) - outline.penX;
+        this.glyphF32[gBase + 5] = this.baseline + shaped!.yOffset(col) - outline.penY;
+      } else {
+        this.glyphF32[gBase + 4] = isShaped ? shaped!.xOffset(col) : 0; // glyphOff.x
+        this.glyphF32[gBase + 5] = 0; // glyphOff.y
+      }
       this.glyphU32[gBase + 6] = fg & 0xffffff;
       let style = (rect.page & 0xff) << 8;
       if (rect.colored) style |= StyleBit.COLORED;

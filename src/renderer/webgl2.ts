@@ -150,6 +150,10 @@ export class WebGL2Renderer implements Renderer {
   private curX = 0;
   private curShape: CursorShape = 'block';
   private curGlyphRect: AtlasRect | null = null;
+  // Glyph offset within the cursor cell for the overpainted glyph. Non-zero only
+  // when the covered glyph is an outline (HarfBuzz) tile that overhangs its cell.
+  private curGlyphOffX = 0;
+  private curGlyphOffY = 0;
 
   private readonly onLost = (e: Event): void => {
     e.preventDefault();
@@ -431,12 +435,18 @@ export class WebGL2Renderer implements Renderer {
     const g = shapedHere ? plan.cluster(cur.x) : line.grapheme(cur.x);
     if (g.length === 0) return;
     const w = line.width(cur.x) === 2 ? 2 : 1;
-    this.curGlyphRect = this.atlas!.ensure(
-      g,
-      styleMask(line.flags(cur.x)),
-      w,
-      shapedHere ? plan.hintFor(cur.x) : undefined,
-    );
+    const hint = shapedHere ? plan.hintFor(cur.x) : undefined;
+    this.curGlyphRect = this.atlas!.ensure(g, styleMask(line.flags(cur.x)), w, hint);
+    // An outline glyph's tile is offset from the cell so its overhang lands
+    // right; carry that into the cursor overpaint so the covered letter matches.
+    const outline = hint?.outline;
+    if (outline !== undefined && shapedHere) {
+      this.curGlyphOffX = plan!.xOffset(cur.x) - outline.penX;
+      this.curGlyphOffY = this.baseline + plan!.yOffset(cur.x) - outline.penY;
+    } else {
+      this.curGlyphOffX = 0;
+      this.curGlyphOffY = 0;
+    }
   }
 
   // --- GPU upload ---------------------------------------------------------
@@ -614,8 +624,8 @@ export class WebGL2Renderer implements Renderer {
       f[1] = rect.y;
       f[2] = rect.w;
       f[3] = rect.h;
-      f[4] = 0;
-      f[5] = 0;
+      f[4] = this.curGlyphOffX;
+      f[5] = this.curGlyphOffY;
       u[6] = (this.theme.cursorText ?? this.theme.background) & 0xffffff;
       let style = (rect.page & 0xff) << 8;
       if (rect.colored) style |= 1;
@@ -798,10 +808,13 @@ export class WebGL2Renderer implements Renderer {
     const gl = this.gl;
     if (!gl || !this.scratchCtx) return;
     if (this.atlas) this.atlas.destroy();
-    // Grow the scratch surface to hold the widest slot (a wide glyph).
+    // Grow the scratch surface to hold the widest slot. With a shaper configured
+    // that is an outline tile, which carries a cluster's full ink and overhangs
+    // its cell (see shaper/harfbuzz.ts: up to ~cluster advance + 2 cells wide and
+    // ~2 cells tall); without one it is at most a wide (2-cell) glyph.
     const sc = this.scratch as HTMLCanvasElement;
-    sc.width = this.cellW * 2;
-    sc.height = this.cellH;
+    sc.width = this.opts.shaper ? this.cellW * 6 : this.cellW * 2;
+    sc.height = this.opts.shaper ? this.cellH * 3 : this.cellH;
     const font: RasterFont = {
       cellW: this.cellW,
       cellH: this.cellH,
@@ -875,6 +888,15 @@ export class WebGL2Renderer implements Renderer {
     this.cellW = g.cellW;
     this.cellH = g.cellH;
     this.baseline = g.baseline;
+    // Hand the shaper the device-pixel geometry it needs to lay glyphs (see the
+    // Canvas2D backend for the same call). A code-point shaper ignores it.
+    this.opts.shaper?.setMetrics?.({
+      cellWidth: g.cellW,
+      cellHeight: g.cellH,
+      baseline: g.baseline,
+      deviceFontPx: this.deviceFontPx,
+      dpr: this.dpr,
+    });
     this.fontCache.clear();
   }
 

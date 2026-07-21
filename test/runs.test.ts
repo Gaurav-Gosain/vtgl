@@ -147,12 +147,13 @@ test('the planned columns carry the shaper raster hints', () => {
   const s = row((x) => x.writeText(0, 0, 'لا'));
   const rs = new RowShaper();
   rs.plan(s.getLine(0), COLS, arabicShaper());
-  // lam-alef: both letters join, so both are rastered rtl and fitted, and the
-  // run is reversed so the lam (logical index 0) lands in the right-hand cell.
-  const ZWJ = '‍';
-  assert.equal(rs.rtl(0), true);
-  assert.equal(rs.fitAdvance(0), true);
-  assert.equal(rs.cluster(1), 'ل' + ZWJ, 'the lam is initial and sits on the right');
-  assert.equal(rs.cluster(0), ZWJ + 'ا', 'the alef is final and sits on the left');
-  assert.notEqual(rs.key(0), rs.key(1), 'the two forms are cached separately');
+  // lam-alef is a mandatory ligature: one fitted glyph spanning the two cells,
+  // placed in the left-hand column, with the right-hand column blanked so the
+  // lam is not drawn again underneath it.
+  assert.equal(rs.cluster(0), String.fromCodePoint(0xfefb), 'the isolated lam-alef ligature');
+  assert.equal(rs.fitAdvance(0), true, 'the ligature is fitted');
+  assert.equal(rs.glyphCols(0), 2, 'and spans both cells');
+  assert.equal(rs.cluster(1), '', 'the covered cell carries a blank cluster');
+  assert.equal(rs.glyphCols(1), 1, 'a blank spans one cell');
+  assert.notEqual(rs.key(0), rs.key(1), 'the ligature and the blank are cached separately');
 });
