@@ -30,6 +30,8 @@ export class RowShaper {
   private cols = 0;
   private active = new Uint8Array(0);
   private hints = new Uint8Array(0);
+  /** Column span of the glyph at each column, 1 unless a ligature spans more. */
+  private span = new Uint8Array(0);
   private xoff = new Float32Array(0);
   private clusters: string[] = [];
   private keys: string[] = [];
@@ -44,6 +46,7 @@ export class RowShaper {
     this.cols = cols;
     this.active = new Uint8Array(cols);
     this.hints = new Uint8Array(cols);
+    this.span = new Uint8Array(cols);
     this.xoff = new Float32Array(cols);
     this.clusters = new Array<string>(cols).fill('');
     this.keys = new Array<string>(cols).fill('');
@@ -100,10 +103,14 @@ export class RowShaper {
         // than trust the column.
         if (g.col < 0 || g.col >= n) continue;
         const c = col + g.col;
+        // A glyph that spans more columns than the run has left would raster and
+        // paint into a cell the run does not own, so clamp it to the run.
+        const cols = g.cols === undefined ? 1 : g.cols;
         this.active[c] = 1;
         this.clusters[c] = g.cluster;
         this.keys[c] = g.atlasKey;
         this.hints[c] = (g.rtl ? HINT_RTL : 0) | (g.fitAdvance ? HINT_FIT : 0);
+        this.span[c] = cols < 1 ? 1 : c + cols > n ? n - g.col : cols;
         this.xoff[c] = g.xOffset;
         this.planned = true;
       }
@@ -128,6 +135,11 @@ export class RowShaper {
 
   has(col: number): boolean {
     return this.active[col] === 1;
+  }
+  /** Columns the glyph at this column spans, at least 1. */
+  glyphCols(col: number): number {
+    const s = this.span[col];
+    return s < 1 ? 1 : s;
   }
   cluster(col: number): string {
     return this.clusters[col];

@@ -413,9 +413,12 @@ export class Canvas2DRenderer implements Renderer {
     const dx = x + shaped.xOffset(col);
     if (shaped.fitAdvance(col)) {
       const advance = this.advanceOf(ctx, cluster);
+      // A ligature glyph is fitted across the cells it spans, matching the
+      // 2-column atlas slot GlyphAtlas.raster fills on the WebGL2 path.
+      const fitW = shaped.glyphCols(col) * this.cellW;
       ctx.save();
       ctx.translate(dx, baselineY);
-      if (advance > 0) ctx.scale(this.cellW / advance, 1);
+      if (advance > 0) ctx.scale(fitW / advance, 1);
       ctx.fillText(cluster, 0, 0);
       ctx.restore();
     } else {

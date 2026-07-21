@@ -234,10 +234,13 @@ export class InstanceBuffers {
       const grapheme = isShaped ? shaped.cluster(col) : line.grapheme(col);
       if (grapheme.length === 0) continue;
 
+      // A shaped ligature spans the cells the VT gave its two letters, so its
+      // slot and quad are that wide; an unshaped glyph spans its own cell width.
+      const glyphCols = isShaped ? shaped.glyphCols(col) : spanCols;
       const rect = provider.ensure(
         grapheme,
         styleMask(flags),
-        spanCols,
+        glyphCols,
         isShaped ? shaped.hintFor(col) : undefined,
       );
       if (rect === null) continue; // could not place; drawn as blank this frame

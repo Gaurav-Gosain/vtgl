@@ -378,11 +378,12 @@ test('shaping visibly changes the Arabic words and nothing else', async ({ page 
 
 test('the shaped word matches the Unicode presentation forms', async ({ page }) => {
   // The ground-truth check, and the one that would catch a shaper that made the
-  // output merely different rather than right. Unicode encodes the four Arabic
-  // joining forms explicitly in Presentation Forms-B, so the expected picture of
-  // salaam is a known string: meem, alef-final, lam-medial, seen-initial, in
-  // that left-to-right order. Rendering that reference through the same
-  // renderer and comparing pixels tests the joining decision and the
+  // output merely different rather than right. Unicode encodes the Arabic joining
+  // forms explicitly in Presentation Forms-B, including the lam-alef ligature, so
+  // the expected picture of salaam is a known layout: meem isolated, then the
+  // final lam-alef ligature spanning two cells, then seen initial, in that
+  // left-to-right order. Rendering that reference through the same renderer and
+  // comparing pixels tests the joining decision, the ligature and the
   // right-to-left column assignment at once.
   for (const backend of ['webgl2', 'canvas2d'] as const) {
     const r = await page.evaluate(

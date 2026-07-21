@@ -15,14 +15,29 @@ What it does. A grapheme-aware VT puts one Arabic letter in each cell (the
 torture corpus records that as the `split` layout, measured against a real
 ghostty-vt buffer). The shaper groups contiguous Arabic cells of uniform style
 into a run, derives each letter's joining context from the Unicode joining
-types, and rasters it with a zero-width joiner on whichever side joins, so the
-browser's own text engine returns the initial, medial, final or isolated form.
-The run's cells are then laid out right to left, and each glyph's advance is
-scaled to its cell so the connecting strokes meet on the cell boundary.
+types, and maps the base letter plus that context to its Arabic Presentation
+Forms-B code point (U+FE70..U+FEFF), which encodes the initial, medial, final
+and isolated forms explicitly. The browser draws the form it is handed. The
+run's cells are then laid out right to left, and each glyph's advance is scaled
+to its cell so the connecting strokes meet on the cell boundary.
 
-No shaping engine is shipped and no dependency was added. The browser was
-already doing the shaping; the renderer was bypassing it by rasterising one
-isolated cell at a time.
+This selects the form itself rather than asking the browser's canvas to resolve
+a zero-width joiner, which is what makes it work on every engine. The joiner
+trick it replaced was measured on Chromium and Firefox: Chromium honoured a
+joiner on either side of a letter, but Firefox honoured only a trailing one and
+dropped a leading one, so a word's medial and final letters came back unjoined
+on Firefox. Selecting the presentation form removes that dependency, and shaped
+Arabic now joins identically on both, verified on screen on real Firefox and
+Chromium.
+
+A letter outside the presentation-form range (Arabic Supplement, Extended-A,
+tatweel, and the few core code points that have no form) still falls back to the
+zero-width joiner, so it joins on Chromium and comes back isolated on Firefox.
+Nothing in the test corpus reaches that path; core Arabic does not.
+
+No shaping engine is shipped and no dependency was added: the presentation forms
+are a fixed table of code points, and the browser rasters each one as an ordinary
+glyph.
 
 The verification is a ground-truth comparison rather than an eyeball. Unicode
 encodes the four joining forms explicitly in Presentation Forms-B, so the
@@ -52,10 +67,13 @@ What it is not:
   character, so it ends the run. Two Arabic words on a line each join correctly
   and each read right to left internally, but the words stay in logical order
   left to right. A full sentence is therefore still not laid out correctly.
-- **No lam-alef ligature.** The VT gave lam and alef a cell each and the renderer
-  draws one glyph per cell, so they come out as lam-initial plus alef-final
-  rather than the single ligature glyph a real shaper produces. The corpus
-  records this as `arabic-lam-alef`.
+- **Lam-alef is the one ligature.** Lam followed by any of the four alef variants
+  is a mandatory ligature. The VT gives lam and alef a cell each; the shaper
+  emits the ligature's own Presentation Forms-B code point (U+FEF5..U+FEFC, final
+  form when the lam joins a letter before it) as a single glyph fitted across the
+  two cells, and blanks the second cell so the lam is not drawn again underneath.
+  The corpus records this as `arabic-lam-alef`. No other ligature is formed:
+  every other cluster is one letter to one cell.
 - **Arabic block only.** The joining table covers U+0600..U+06FF. Syriac, N'Ko,
   Mongolian, Adlam and Thaana join by the same mechanism and would fall out of
   the same code, but their tables are not transcribed and nothing tests them.
@@ -82,13 +100,29 @@ neither has.
 
 ### Ligatures, selection, subpixel antialiasing
 
-None are implemented. Ligatures now have the run grouping they need, but nothing
-produces them: a ligature is several cells collapsing into one glyph, and the
-renderer draws one glyph per cell. Selection is a host concern and the type
-surface says so: there is no `Theme.selection`, and a host that wants selection
-draws its own overlay over the canvas. Subpixel antialiasing would need
-foreground baked into the glyph, which is why `atlasKeyBaked` and `quantize`
-exist; nothing calls them.
+The only ligature is Arabic lam-alef, described above: a shaped glyph now carries
+a column span, so a two-cell cluster can collapse into one fitted glyph. No
+general ligature substitution exists, and programming ligatures (a font's `==>`
+or `!=`) are not formed: those are a font-feature question the atlas does not ask
+the face. Selection is a host concern and the type surface says so: there is no
+`Theme.selection`, and a host that wants selection draws its own overlay over the
+canvas. Subpixel antialiasing would need foreground baked into the glyph, which
+is why `atlasKeyBaked` and `quantize` exist; nothing calls them.
+
+### Shaped joins seam on the WebGL2 backend
+
+A shaped run's connecting strokes meet cleanly on the Canvas2D backend and show a
+faint notch at the cell boundary on the WebGL2 one. The cause is the atlas: the
+Canvas2D path draws every glyph of a row onto one surface, so a connecting stroke
+antialiases continuously across the boundary and a glyph's ink is free to overhang
+into the next cell. The WebGL2 path rasters each glyph into its own atlas slot,
+cropped to exactly the cell, and samples the slots as separate quads, so there is
+no antialiasing shared across the boundary and no overhang to fill the seam. The
+notch is small and predates presentation-form selection; it is a property of
+per-cell rasterisation, not of the shaper. Closing it cleanly needs the run
+rastered as one bitmap rather than one slot per cell, which is sub-cell glyph
+positioning and belongs to a real run shaper. A host that needs pixel-clean
+Arabic joins today should use the Canvas2D backend.
 
 ### Blink needs a driver
 

@@ -330,6 +330,13 @@ export interface ShapedGlyph {
    * the font puts them and do not meet across the cell boundary.
    */
   fitAdvance: boolean;
+  /**
+   * Columns this glyph spans, starting at `col`. Default 1. A shaper that
+   * collapses two cells into one glyph (a lam-alef ligature) returns 2 here and
+   * emits an empty cluster for the covered column, so the ligature is fitted and
+   * rastered across both cells the VT assigned it rather than crammed into one.
+   */
+  cols?: number;
 }
 
 /** Result of shaping one contiguous same-style run of cells. */

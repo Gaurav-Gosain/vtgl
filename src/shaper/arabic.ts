@@ -9,15 +9,27 @@
 //
 // This shaper does NOT implement Unicode joining or ship a shaping engine. It
 // derives each letter's joining context from the Unicode joining types below and
-// then hands the browser a cluster that forces that context: a ZWJ on the side
-// that joins. Chromium's canvas resolves that through its own text engine and
-// returns the right contextual glyph, so the shaping is HarfBuzz's, not ours.
+// then selects the letter's contextual glyph directly: Unicode encodes the four
+// joining forms of every core Arabic letter as distinct code points in Arabic
+// Presentation Forms-B (U+FE70..U+FEFF), so the shaper maps base letter plus
+// join context to the isolated, initial, medial or final form and rasters that.
+// The browser draws the form it is handed; no per-engine text behaviour is
+// relied on, so the joining forms are identical on Chromium and Firefox.
 //
-// The one non-obvious part is direction. A trailing ZWJ is only honoured when
-// the raster context is RTL; under the default LTR direction it is dropped and
-// every letter comes back isolated or final. That is why ShapedGlyph carries
-// `rtl`, and it is measured rather than assumed (docs/limits.md records the
-// experiment).
+// Two things this earns over the older approach. It measured whether the browser
+// would resolve a zero-width joiner into a contextual form, and Chromium would
+// but Firefox honoured only a trailing joiner and dropped a leading one, so a
+// word came out with its medial and final letters unjoined on Firefox. Selecting
+// the presentation form ourselves removes that dependency. It also gives the
+// lam-alef ligature a code point of its own (U+FEF5..U+FEFC), so lam followed by
+// alef is drawn as the single ligature glyph fitted across the two cells the VT
+// assigned it, instead of a lam and an alef crammed one per cell.
+//
+// A letter outside the presentation-form range (Arabic Supplement, Extended-A,
+// and the handful of core code points without forms) has no form to select, so
+// it falls back to the zero-width joiner it always used, which joins on Chromium
+// and comes back isolated on Firefox. Nothing in the test corpus reaches that
+// path; core Arabic does not.
 //
 // Scope is deliberately narrow and is spelled out in docs/limits.md: joining
 // forms and run-local right-to-left ordering for the Arabic block, on one line,
@@ -134,12 +146,101 @@ function isArabicDigit(cp: number): boolean {
 }
 
 /**
+ * Contextual forms for the core Arabic letters, from Arabic Presentation
+ * Forms-B. Keyed by base code point, each value is [isolated, final, initial,
+ * medial]; a 0 means the letter has no form of that shape (a right-joining
+ * letter has no initial or medial, so those are 0). A code point absent from the
+ * map has no presentation form at all and takes the joiner fallback.
+ *
+ * The four indices line up with FORM below: iso 0, final 1, initial 2, medial 3.
+ */
+const FORMS: Readonly<Record<number, readonly [number, number, number, number]>> = {
+  0x0621: [0xfe80, 0, 0, 0], // hamza
+  0x0622: [0xfe81, 0xfe82, 0, 0], // alef madda
+  0x0623: [0xfe83, 0xfe84, 0, 0], // alef hamza above
+  0x0624: [0xfe85, 0xfe86, 0, 0], // waw hamza
+  0x0625: [0xfe87, 0xfe88, 0, 0], // alef hamza below
+  0x0626: [0xfe89, 0xfe8a, 0xfe8b, 0xfe8c], // yeh hamza
+  0x0627: [0xfe8d, 0xfe8e, 0, 0], // alef
+  0x0628: [0xfe8f, 0xfe90, 0xfe91, 0xfe92], // beh
+  0x0629: [0xfe93, 0xfe94, 0, 0], // teh marbuta
+  0x062a: [0xfe95, 0xfe96, 0xfe97, 0xfe98], // teh
+  0x062b: [0xfe99, 0xfe9a, 0xfe9b, 0xfe9c], // theh
+  0x062c: [0xfe9d, 0xfe9e, 0xfe9f, 0xfea0], // jeem
+  0x062d: [0xfea1, 0xfea2, 0xfea3, 0xfea4], // hah
+  0x062e: [0xfea5, 0xfea6, 0xfea7, 0xfea8], // khah
+  0x062f: [0xfea9, 0xfeaa, 0, 0], // dal
+  0x0630: [0xfeab, 0xfeac, 0, 0], // thal
+  0x0631: [0xfead, 0xfeae, 0, 0], // reh
+  0x0632: [0xfeaf, 0xfeb0, 0, 0], // zain
+  0x0633: [0xfeb1, 0xfeb2, 0xfeb3, 0xfeb4], // seen
+  0x0634: [0xfeb5, 0xfeb6, 0xfeb7, 0xfeb8], // sheen
+  0x0635: [0xfeb9, 0xfeba, 0xfebb, 0xfebc], // sad
+  0x0636: [0xfebd, 0xfebe, 0xfebf, 0xfec0], // dad
+  0x0637: [0xfec1, 0xfec2, 0xfec3, 0xfec4], // tah
+  0x0638: [0xfec5, 0xfec6, 0xfec7, 0xfec8], // zah
+  0x0639: [0xfec9, 0xfeca, 0xfecb, 0xfecc], // ain
+  0x063a: [0xfecd, 0xfece, 0xfecf, 0xfed0], // ghain
+  0x0641: [0xfed1, 0xfed2, 0xfed3, 0xfed4], // feh
+  0x0642: [0xfed5, 0xfed6, 0xfed7, 0xfed8], // qaf
+  0x0643: [0xfed9, 0xfeda, 0xfedb, 0xfedc], // kaf
+  0x0644: [0xfedd, 0xfede, 0xfedf, 0xfee0], // lam
+  0x0645: [0xfee1, 0xfee2, 0xfee3, 0xfee4], // meem
+  0x0646: [0xfee5, 0xfee6, 0xfee7, 0xfee8], // noon
+  0x0647: [0xfee9, 0xfeea, 0xfeeb, 0xfeec], // heh
+  0x0648: [0xfeed, 0xfeee, 0, 0], // waw
+  0x0649: [0xfeef, 0xfef0, 0, 0], // alef maksura
+  0x064a: [0xfef1, 0xfef2, 0xfef3, 0xfef4], // yeh
+};
+
+/** Index into a FORMS entry, and the join context that selects it. */
+const FORM = { ISO: 0, FINAL: 1, INITIAL: 2, MEDIAL: 3 } as const;
+
+/**
+ * Lam plus alef is a mandatory ligature: the two letters collapse into one
+ * glyph, encoded in Presentation Forms-B. Keyed by the alef code point, each
+ * value is [isolated, final]; the final form is used when the lam itself joins
+ * to a preceding letter. There is no initial or medial lam-alef.
+ */
+const LAM = 0x0644;
+const LAM_ALEF: Readonly<Record<number, readonly [number, number]>> = {
+  0x0622: [0xfef5, 0xfef6], // lam + alef madda
+  0x0623: [0xfef7, 0xfef8], // lam + alef hamza above
+  0x0625: [0xfef9, 0xfefa], // lam + alef hamza below
+  0x0627: [0xfefb, 0xfefc], // lam + alef
+};
+
+/**
+ * The presentation form for a base letter in a given join context, or 0 if the
+ * letter has no form. A letter that joins on a side it has no form for (a
+ * right-joining letter asked for a medial) falls back toward the isolated form:
+ * medial to final, initial and final to isolated.
+ */
+function presentationForm(base: number, joinPrev: boolean, joinNext: boolean): number {
+  const row = FORMS[base];
+  if (row === undefined) return 0;
+  let idx = joinPrev && joinNext ? FORM.MEDIAL : joinNext ? FORM.INITIAL : joinPrev ? FORM.FINAL : FORM.ISO;
+  let cp = row[idx];
+  if (cp === 0 && idx === FORM.MEDIAL) cp = row[FORM.FINAL];
+  if (cp === 0) cp = row[FORM.ISO];
+  return cp;
+}
+
+/** The grapheme's trailing combining marks: everything after its base scalar. */
+function marksOf(grapheme: string): string {
+  const first = grapheme.codePointAt(0) ?? 0;
+  return grapheme.slice(first > 0xffff ? 2 : 1);
+}
+
+/**
  * Contextual shaper for the Arabic block.
  *
  * Two things happen to a run, and both are needed for either to be worth doing:
  *
- *   1. Joining. Each letter is rastered with a ZWJ on whichever side joins, so
- *      the browser picks the initial/medial/final/isolated form.
+ *   1. Joining. Each letter's initial/medial/final/isolated form is selected
+ *      from Presentation Forms-B by its join context and rastered directly, so
+ *      the same forms come back on every browser. A lam followed by an alef is
+ *      collapsed into its mandatory ligature glyph across the two cells.
  *   2. Run-local reordering. The cells of the run are reversed, because a joined
  *      letter's connecting stroke points at its neighbour and Arabic neighbours
  *      run right to left. Shaping without reversing produces letters whose
@@ -167,26 +268,65 @@ export function arabicShaper(): ShaperHook {
 
       for (let i = 0; i < n; i++) {
         const jt = joiningType(base[i]);
-        // A transparent cell (a lone combining mark in its own cell) is not a
-        // letter and gets no context of its own.
         // Each side asks two questions: can this letter take a joined form on
         // that side, and does the neighbour offer a connection on the facing
         // side. The two are not the same predicate. Alef only joins backward,
         // so it cannot start a connection to the letter after it but it does
         // accept one from the letter before it, which is what makes the lam in
-        // salaam medial rather than final.
+        // salaam medial rather than final. A transparent cell (a lone combining
+        // mark in its own cell) is not a letter and gets no context of its own.
         const joinPrev =
           jt !== Joining.T && joinsBackward(jt) && joinsForward(prevBase(base, i));
         const joinNext =
           jt !== Joining.T && joinsForward(jt) && joinsBackward(nextBase(base, i));
-        const cluster = (joinPrev ? ZWJ : '') + cells[i] + (joinNext ? ZWJ : '');
-        // Only a letter that actually joins needs either treatment. Fitting
-        // exists so connecting strokes meet on the cell boundary, so a letter
-        // with nothing to connect to (a hamza, a digit, a lone alef) keeps its
-        // natural advance instead of being stretched to fill the cell for no
-        // reason. That also leaves a one-letter run rendering exactly as it does
-        // with no shaper configured at all.
+
+        // Lam followed by an alef variant is the one mandatory ligature: the two
+        // cells become a single glyph. The final ligature form is used when the
+        // lam itself joins to a preceding letter. The glyph is placed in the
+        // alef's reordered column, the left of the two, and spans both; the lam's
+        // own column is blanked so its base letter is not drawn again underneath.
+        const lig = base[i] === LAM && i + 1 < n ? LAM_ALEF[base[i + 1]] : undefined;
+        if (lig !== undefined) {
+          const cp = joinPrev ? lig[1] : lig[0];
+          const c = String.fromCodePoint(cp) + marksOf(cells[i]) + marksOf(cells[i + 1]);
+          glyphs.push({
+            atlasKey: 'ar\u0001' + styleTag + 'L\u0001' + c,
+            cluster: c,
+            col: reorder(base, i + 1),
+            xOffset: 0,
+            rtl: false,
+            fitAdvance: true,
+            cols: 2,
+          });
+          glyphs.push({
+            atlasKey: 'arblank',
+            cluster: '',
+            col: reorder(base, i),
+            xOffset: 0,
+            rtl: false,
+            fitAdvance: false,
+          });
+          i++;
+          continue;
+        }
+
+        // A letter with nothing to join to keeps its own code point and its
+        // natural advance: it is not remapped to a form and not fitted, so a
+        // hamza, a digit or a lone alef rasters exactly as it does with no shaper.
+        // Fitting exists only so a joining letter's connecting stroke meets its
+        // neighbour's on the cell boundary.
         const joined = joinPrev || joinNext;
+        const form = joined ? presentationForm(base[i], joinPrev, joinNext) : 0;
+        // A form selected directly needs no joining context to resolve, so its
+        // raster is engine-independent and needs no right-to-left context. A
+        // joining letter with no form (Arabic Supplement, Extended-A, tatweel)
+        // falls back to the zero-width joiner, which Chromium resolves under a
+        // right-to-left context and Firefox leaves isolated.
+        const cluster =
+          form !== 0
+            ? String.fromCodePoint(form) + marksOf(cells[i])
+            : (joinPrev ? ZWJ : '') + cells[i] + (joinNext ? ZWJ : '');
+        const rtl = form !== 0 ? false : joined;
         glyphs.push({
           // Namespaced away from the default path's `grapheme + mask` keys on
           // purpose: a fitted raster of a letter is not interchangeable with the
@@ -195,7 +335,7 @@ export function arabicShaper(): ShaperHook {
           cluster,
           col: reorder(base, i),
           xOffset: 0,
-          rtl: joined,
+          rtl,
           fitAdvance: joined,
         });
       }

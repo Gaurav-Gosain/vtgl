@@ -44,17 +44,19 @@ test('the block test accepts Arabic and nothing else', () => {
 });
 
 test('a four-letter word gets initial, medial, final and isolated forms', () => {
-  // salaam: seen lam alef meem. Alef is right-joining, so it takes a final form
-  // from the lam before it but gives the meem after it nothing to join to.
-  const g = shape('سلام');
-  assert.equal(g[0].cluster, 'س' + ZWJ, 'seen is initial: joins forward only');
-  assert.equal(g[1].cluster, ZWJ + 'ل' + ZWJ, 'lam is medial: joins both ways');
-  assert.equal(g[2].cluster, ZWJ + 'ا', 'alef is final: joins backward only');
-  assert.equal(g[3].cluster, 'م', 'meem is isolated: alef does not join forward');
+  // muharram: meem hah reh meem. Reh is right-joining, so it takes a final form
+  // from the hah before it but gives the meem after it nothing to join to. Each
+  // letter is remapped to its Presentation Forms-B code point.
+  const g = shape('محرم');
+  const cp = String.fromCodePoint;
+  assert.equal(g[0].cluster, cp(0xfee3), 'meem is initial: joins forward only');
+  assert.equal(g[1].cluster, cp(0xfea4), 'hah is medial: joins both ways');
+  assert.equal(g[2].cluster, cp(0xfeae), 'reh is final: joins backward only');
+  assert.equal(g[3].cluster, 'م', 'meem is isolated: reh does not join forward, code point kept');
 });
 
 test('the run is laid out right to left', () => {
-  const g = shape('سلام');
+  const g = shape('محرم');
   assert.deepEqual(
     g.map((x) => x.col),
     [3, 2, 1, 0],
@@ -77,17 +79,51 @@ test('a letter with nothing to join to is left at its natural advance', () => {
   assert.equal(g[0].fit, false);
   assert.equal(g[0].col, 0);
 
-  // Whereas a letter that does join is fitted, because its stroke has to meet
-  // its neighbour's on the cell boundary.
+  // Whereas lam-alef joins into a mandatory ligature that is fitted across the
+  // two cells: one glyph carrying the ligature and a blank covering the second
+  // cell so the lam is not drawn again underneath it.
   const w = shape('لا');
-  assert.ok(w.every((x) => x.fit), 'both letters of lam-alef join and are fitted');
+  const cp = String.fromCodePoint;
+  assert.equal(w[0].cluster, cp(0xfefb), 'lam-alef is the isolated ligature');
+  assert.equal(w[0].fit, true, 'the ligature is fitted across its cells');
+  assert.equal(w[1].cluster, '', 'the covered cell is blanked');
 });
 
 test('combining marks are transparent to the joining decision', () => {
   // beh + fatha + teh: the mark must not stop the two letters joining through it.
   const g = shape('بَت');
-  assert.equal(g[0].cluster, 'ب' + ZWJ, 'beh still joins forward across the mark');
-  assert.equal(g[2].cluster, ZWJ + 'ت', 'teh still joins backward across the mark');
+  const cp = String.fromCodePoint;
+  assert.equal(g[0].cluster, cp(0xfe91), 'beh takes its initial form across the mark');
+  assert.equal(g[2].cluster, cp(0xfe96), 'teh takes its final form across the mark');
+});
+
+test('lam plus each alef variant collapses into its mandatory ligature', () => {
+  const cp = String.fromCodePoint;
+  // Isolated ligature: the lam has no preceding letter to join to.
+  const cases: [string, number][] = [
+    ['لا', 0xfefb], // lam + alef
+    ['لآ', 0xfef5], // lam + alef madda
+    ['لأ', 0xfef7], // lam + alef hamza above
+    ['لإ', 0xfef9], // lam + alef hamza below
+  ];
+  for (const [word, form] of cases) {
+    const g = shape(word);
+    assert.equal(g.length, 2, `${word}: one ligature glyph and one blank`);
+    assert.equal(g[0].cluster, cp(form), `${word}: isolated ligature form`);
+    assert.equal(g[1].cluster, '', `${word}: covered cell blanked`);
+  }
+});
+
+test('a lam-alef takes the final ligature when the lam joins a letter before it', () => {
+  const cp = String.fromCodePoint;
+  // salaam: seen lam alef meem. The lam joins backward to the seen, so the
+  // lam-alef is the final ligature FEFC, not the isolated FEFB. It spans two
+  // columns and the covered column is blanked.
+  const run = arabicShaper().shapeRun([...'سلام'], PLAIN);
+  const lig = run.glyphs.find((x) => x.cluster === cp(0xfefc));
+  assert.ok(lig, 'the final lam-alef ligature is emitted');
+  assert.equal(lig!.cols, 2, 'the ligature spans the two cells');
+  assert.equal(run.glyphs.find((x) => x.cluster === '')?.cluster, '', 'the second cell is blanked');
 });
 
 test('an Arabic-Indic number inside a run keeps its digits in reading order', () => {
