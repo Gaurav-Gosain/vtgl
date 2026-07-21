@@ -215,6 +215,12 @@ export interface RenderStats {
   atlasUploads: number;
   /** Whether this frame was a full redraw (mount/resize/theme). */
   full: boolean;
+  /**
+   * True when the frame changed nothing visible and its draws were not
+   * reissued, leaving the previous frame standing. Always false on Canvas2D,
+   * which retains its surface and reaches the same result by drawing nothing.
+   */
+  skipped: boolean;
   /** CPU time spent in render(), milliseconds. */
   cpuMs: number;
 }
@@ -259,6 +265,18 @@ export interface Renderer {
 
   /** Replace colors. Forces a full redraw. */
   setTheme(theme: Theme): void;
+
+  /**
+   * Force the next render to redraw in full, even if nothing changed.
+   *
+   * The WebGL2 backend leaves the previous frame standing when a frame would
+   * reproduce it exactly, which is correct for anything that only looks at the
+   * canvas: the compositor still holds that frame. It is not correct for a
+   * caller that reads the drawing buffer back, because the buffer is undefined
+   * once the frame it held has been composited. Anything doing readPixels or
+   * toDataURL should invalidate first so the frame it reads is one that drew.
+   */
+  invalidate(): void;
 
   getMetrics(): Metrics;
 

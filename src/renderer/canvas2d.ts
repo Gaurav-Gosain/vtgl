@@ -155,6 +155,10 @@ export class Canvas2DRenderer implements Renderer {
     this.forceFull = true;
   }
 
+  invalidate(): void {
+    this.forceFull = true;
+  }
+
   dispose(): void {
     this.scheduler?.dispose();
     this.scheduler = null;
@@ -270,6 +274,7 @@ export class Canvas2DRenderer implements Renderer {
       drawCalls: 1,
       atlasUploads: 0,
       full,
+      skipped: false,
       cpuMs: now() - t0,
     };
     this.emitter.emit('render', stats);

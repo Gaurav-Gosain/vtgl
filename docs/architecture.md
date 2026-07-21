@@ -192,7 +192,9 @@ flowchart LR
   GEN -- yes --> RETRY[restart as a full frame<br/>up to 3 attempts]
   RETRY --> BUILD
   GEN -- no --> UPLOAD[bufferSubData]
-  UPLOAD --> DRAWS[3 to 5 instanced draws]
+  UPLOAD --> REDUNDANT{nothing dirty, no scroll,<br/>no blink, no atlas upload,<br/>cursor unmoved?}
+  REDUNDANT -- yes --> STAND[skip the draws:<br/>the last frame stands]
+  REDUNDANT -- no --> DRAWS[3 to 5 instanced draws]
 ```
 
 On a full frame all three streams are uploaded whole. On an incremental frame the

@@ -213,6 +213,51 @@ export const churnScenario: Scenario = {
 
 const RAMP = '@#S%?*+;:,. abcdefghijklmnopqrstuvwxyz0123456789';
 
+/**
+ * A screen that is mostly still: dense static content with three rows rewritten
+ * per frame and the cursor walking across one of them. This is the shape the
+ * damage path is built for and the shape it can break, because every row the
+ * renderer decides is clean keeps whatever the slot already held. A stale row
+ * is invisible to any check that only looks at the rows that did change, so the
+ * partial-update equivalence probe diffs the whole surface against a full
+ * rebuild of the same final state.
+ */
+export const partialScenario: Scenario = {
+  name: 'partial',
+  damage: 'partial',
+  description: 'Mostly static screen with three rows and the cursor moving per frame.',
+  cols: COLS,
+  rows: ROWS,
+  build() {
+    const s = new FakeSource({ cols: COLS, rows: ROWS, fg: FG, bg: BG });
+    for (let r = 0; r < ROWS; r++) {
+      const row = s.activeTop + r;
+      for (let c = 0; c < COLS; c++) {
+        const ch = RAMP[(r * 5 + c * 3) % RAMP.length];
+        const fg = 0x00_00_00 | (((r * 9) & 0xff) << 16) | ((c * 2) & 0xff);
+        s.setCell(row, c, ch.codePointAt(0) ?? 32, { fg });
+      }
+    }
+    s.setCursor({ visible: true, x: 0, y: s.activeTop });
+    return s;
+  },
+  step(s, frame) {
+    // Three rows spread across the grid so the dirty set is never contiguous:
+    // a coalescing upload that got its run boundaries wrong shows up here.
+    for (const r of [1, ROWS >> 1, ROWS - 2]) {
+      const row = s.activeTop + r;
+      for (let c = 0; c < COLS; c++) {
+        const ch = RAMP[(r * 5 + c * 3 + frame * 11) % RAMP.length];
+        const fg = 0x00_00_00 | (((r * 9 + frame * 13) & 0xff) << 16) | ((c * 2) & 0xff);
+        s.setCell(row, c, ch.codePointAt(0) ?? 32, { fg });
+      }
+    }
+    // The cursor moves without dirtying a row, which is its own way to leave a
+    // stale frame standing.
+    s.setCursor({ visible: true, x: frame % COLS, y: s.activeTop + (ROWS >> 2) });
+  },
+};
+
 function fillChurn(s: FakeSource, frame: number): void {
   for (let r = 0; r < ROWS; r++) {
     const row = s.activeTop + r;
@@ -446,6 +491,7 @@ export const scenarios: Scenario[] = [
   blocksScenario,
   blankScenario,
   churnScenario,
+  partialScenario,
 ];
 
 /** The four workloads the performance study characterised the 2D bundle on. */

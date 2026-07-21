@@ -51,7 +51,7 @@ Regenerate the three with `npm run capture`, and the banner with
 - Keys the atlas by grapheme cluster string plus a bold/italic mask, not by codepoint, so a ZWJ family emoji, a keycap sequence, or a stacked combining mark caches as one entry and draws as one glyph.
 - Tints monochrome glyphs per instance from a packed 24-bit foreground rather than baking color into the atlas key, so a log dump carrying 24-bit SGR on every cell causes zero atlas traffic.
 - Packs atlas slots with a shelf allocator across up to four 1024x1024 pages, evicting by LRU with a whole-atlas flush and a generation counter the renderer watches to restart a frame that was invalidated mid-build.
-- Reads damage from the source's own `isRowDirty` and uploads only the changed rows, coalescing contiguous dirty rows into one `bufferSubData` per instance stream.
+- Reads damage from the source's own `isRowDirty` and uploads only the changed rows, coalescing contiguous dirty rows into one `bufferSubData` per instance stream, and skips the draws outright on a frame that would reproduce the one already on screen.
 - Draws backgrounds, glyphs, and decorations as three separate instanced passes over `cols * rows` instances each, with blank and spacer-tail cells emitting zero-area quads so the GPU never branches per cell.
 - Handles wide cells by the VT's own width report: a width-2 head takes a two-cell atlas slot, and the width-0 spacer tail that follows it is skipped rather than drawn.
 - Derives cell width, height, and baseline from the font's measured `fontBoundingBoxAscent` and `fontBoundingBoxDescent` rather than from the nominal font size, falling back to the ink box of a tall-and-deep sample and then to proportions of the size.
@@ -136,10 +136,14 @@ flowchart LR
   HIT -- yes --> RECT[cached slot rect]
   RAST --> RECT
   RECT --> UP[bufferSubData<br/>one call per contiguous dirty run]
-  UP --> DRAW[3 to 5 instanced draws<br/>background, glyphs, decorations, cursor]
+  UP --> SAME{anything visibly<br/>different this frame?}
+  SAME -- no --> KEEP[skip the draws:<br/>last frame stands]
+  SAME -- yes --> DRAW[3 to 5 instanced draws<br/>background, glyphs, decorations, cursor]
 ```
 
-Every stage after the damage test is proportional to dirty rows, not to grid size. A clean frame walks `rows` calls to `isRowDirty`, uploads nothing, and still issues the draws, because the instance buffers already hold the whole grid: redrawing unchanged content costs GPU fill, not CPU work.
+Every stage after the damage test is proportional to dirty rows, not to grid size. A frame with no dirty rows walks `rows` calls to `isRowDirty`, uploads nothing, and issues no draws either: it leaves the frame already on screen standing, since the instance buffers hold the whole grid and the next frame that does draw reproduces it exactly. Four things change the picture without dirtying a row and each one forces the draws anyway: a scroll, a blinking cell, an atlas upload, and the cursor.
+
+That last part is why `Renderer.invalidate()` exists. Skipping a draw is correct for anything that only looks at the canvas, because the compositor still holds the last frame, but it is not correct for a caller that reads the drawing buffer back: the buffer is undefined once the frame it held has been composited. Call `invalidate()` before `readPixels` or `toDataURL` so the frame you read is one that drew.
 
 The atlas can invalidate a frame from underneath the builder. When a miss cannot be placed even after growing to the page cap, the packer flushes every entry and bumps a generation counter, which makes every rect resolved earlier in the same frame stale. The renderer notices the generation change and restarts the build as a full frame into the fresh atlas, up to three attempts; if the last attempt still churns, it arms a full redraw for the next frame rather than leaving the screen wrong.
 

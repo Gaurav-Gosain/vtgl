@@ -79,6 +79,8 @@ const DECO_PER_CELL = 2; // underline + strikethrough
 export interface RowBuildResult {
   /** Non-degenerate glyph instances written for this row. */
   glyphs: number;
+  /** Glyph instances in this row carrying the BLINK style bit. */
+  blink: number;
 }
 
 export class InstanceBuffers {
@@ -105,6 +107,13 @@ export class InstanceBuffers {
   glyphBytes = new Uint8Array(0);
   decoBytes = new Uint8Array(0);
 
+  // Blinking glyph instances per slot, and their running total. The glyph
+  // shader animates BLINK cells against u_time, so a frame holding any of them
+  // is never redundant no matter how clean the grid is; the renderer reads
+  // blinkCount to decide whether an unchanged frame can skip its draws.
+  private blinkPerSlot = new Uint32Array(0);
+  blinkCount = 0;
+
   // Device-pixel geometry, set via configure().
   private cellW = 0;
   private cellH = 0;
@@ -116,6 +125,10 @@ export class InstanceBuffers {
     this.cols = cols;
     this.rows = rows;
     const cap = cols * rows;
+    if (rows !== this.blinkPerSlot.length) {
+      this.blinkPerSlot = new Uint32Array(rows);
+      this.blinkCount = 0;
+    }
     if (cap !== this.cap) {
       this.cap = cap;
       this.bg = new Uint32Array(cap);
@@ -194,6 +207,7 @@ export class InstanceBuffers {
     const line = source.getLine(absRow);
     const cols = this.cols;
     let glyphs = 0;
+    let blink = 0;
 
     for (let col = 0; col < cols; col++) {
       const cellIdx = slot * cols + col;
@@ -272,7 +286,10 @@ export class InstanceBuffers {
       let style = (rect.page & 0xff) << 8;
       if (rect.colored) style |= StyleBit.COLORED;
       if (flags & CellFlags.FAINT) style |= StyleBit.FAINT;
-      if (flags & CellFlags.BLINK) style |= StyleBit.BLINK;
+      if (flags & CellFlags.BLINK) {
+        style |= StyleBit.BLINK;
+        blink++;
+      }
       this.glyphU32[gBase + 7] = style;
       glyphs++;
 
@@ -292,7 +309,12 @@ export class InstanceBuffers {
       }
     }
 
-    return { glyphs };
+    // Keep the running blink total in step with this slot's new contents, so
+    // the renderer's redundant-frame test stays O(1) rather than rescanning.
+    this.blinkCount += blink - this.blinkPerSlot[slot];
+    this.blinkPerSlot[slot] = blink;
+
+    return { glyphs, blink };
   }
 
   /** Zero every cell's streams (used on a full clear before rebuilding). */
@@ -302,6 +324,8 @@ export class InstanceBuffers {
     this.glyphU32.fill(0);
     this.decoF32.fill(0);
     this.decoU32.fill(0);
+    this.blinkPerSlot.fill(0);
+    this.blinkCount = 0;
   }
 
   private zeroGlyph(base: number): void {
