@@ -406,6 +406,15 @@ export class Canvas2DRenderer implements Renderer {
       ctx.fillText(cluster, x, baselineY);
       return;
     }
+    // An outline glyph (HarfBuzz) is drawn straight from the font outlines at the
+    // pen the shaper computed, in the current foreground fill. The tile carries
+    // full ink and overhangs the cell freely, matching the WebGL2 atlas path, so
+    // a join is one continuous stroke with no per-cell crop.
+    const outline = shaped.outline(col);
+    if (outline !== undefined) {
+      outline.draw(ctx, x + shaped.xOffset(col), baselineY + shaped.yOffset(col));
+      return;
+    }
     // Set on every shaped glyph and reset after, so a shaped cell cannot leak
     // its direction into the next unshaped one on the same row.
     ctx.textAlign = 'left';
@@ -615,6 +624,16 @@ export class Canvas2DRenderer implements Renderer {
     this.cellW = g.cellW;
     this.cellH = g.cellH;
     this.baseline = g.baseline;
+    // Hand the shaper the device-pixel geometry it needs to lay glyphs. A
+    // code-point shaper ignores this; an outline shaper (HarfBuzz) converts font
+    // units to pixels and fits runs to cells with it.
+    this.opts.shaper?.setMetrics?.({
+      cellWidth: g.cellW,
+      cellHeight: g.cellH,
+      baseline: g.baseline,
+      deviceFontPx: this.deviceFontPx,
+      dpr: this.dpr,
+    });
     this.fontCache.clear();
     // Advances are in device pixels, so a metrics change invalidates them.
     this.advanceCache.clear();

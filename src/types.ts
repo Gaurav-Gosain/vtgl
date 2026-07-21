@@ -296,6 +296,56 @@ export interface RunStyle {
   italic: boolean;
 }
 
+/**
+ * Device-pixel geometry a shaper needs to position and size glyphs. The
+ * renderer computes these from the font metrics and hands them to the shaper
+ * through `ShaperHook.setMetrics` after every measure/resize; a shaper that
+ * works in code points (the PF-B `arabicShaper`) ignores them, while one that
+ * lays glyphs at real coordinates (the HarfBuzz shaper) needs them to convert
+ * font units to pixels and to fit a run across the cells the VT assigned it.
+ */
+export interface ShaperMetrics {
+  /** Cell width in device pixels. */
+  cellWidth: number;
+  /** Cell height in device pixels. */
+  cellHeight: number;
+  /** Baseline offset from the top of the cell, device pixels. */
+  baseline: number;
+  /** Font size in device pixels (CSS fontSize * dpr). */
+  deviceFontPx: number;
+  /** Device pixel ratio. */
+  dpr: number;
+}
+
+/**
+ * A glyph rastered from a font outline rather than through `fillText`.
+ *
+ * The HarfBuzz shaper produces these: each shaped cluster (a base letter plus
+ * any GPOS-positioned marks, composited) is drawn from its glyph outlines into
+ * a tile that carries the cluster's full ink, sized larger than a cell so a
+ * connecting stroke may overhang the cell it started in. That overhang is what
+ * removes the WebGL2 join seam the per-cell `fillText` raster left: nothing is
+ * cropped to a cell boundary. The `fillText` path (default and PF-B) never sets
+ * this, so it is unaffected.
+ */
+export interface OutlineGlyph {
+  /**
+   * Fill the cluster's glyph(s) into `ctx` with the cluster pen origin at
+   * (penX, penY) in device pixels, using the context's current fill style. Both
+   * backends call this: the WebGL2 atlas draws into a tile at the tile-local pen
+   * origin, and the Canvas2D backend draws straight to the screen pen.
+   */
+  draw(ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D, penX: number, penY: number): void;
+  /** Tile width in device pixels (the WebGL2 atlas slot width). */
+  tileW: number;
+  /** Tile height in device pixels (the WebGL2 atlas slot height). */
+  tileH: number;
+  /** Pen origin x within the tile, device pixels from the tile's left edge. */
+  penX: number;
+  /** Pen origin y (the baseline) within the tile, device pixels from the top. */
+  penY: number;
+}
+
 /** One positioned glyph produced by a shaper. */
 export interface ShapedGlyph {
   /**
@@ -303,7 +353,8 @@ export interface ShapedGlyph {
    * mint stable per-glyph keys and they slot into the same atlas the default
    * per-grapheme path uses. The key must vary with everything that changes the
    * rastered pixels, `cluster`, `rtl` and `fitAdvance` included: two glyphs that
-   * look different and share a key would collide in the cache.
+   * look different and share a key would collide in the cache. An outline glyph
+   * keys by (face, glyph ids, offsets, scale) instead of the grapheme.
    */
   atlasKey: string;
   /** The substring to raster for this glyph (contextual form for Arabic, etc). */
@@ -314,8 +365,25 @@ export interface ShapedGlyph {
    * cell's own index, which is how run-local right-to-left ordering is expressed.
    */
   col: number;
-  /** Horizontal offset in device px from the column's left edge. */
+  /**
+   * Horizontal offset in device px from the column's left edge. On the
+   * `fillText` path this is where the cluster is drawn inside its cell; on the
+   * outline path it is where the cluster's pen origin lands relative to the
+   * column, which may sit outside the cell so a run can be positioned at
+   * HarfBuzz coordinates.
+   */
   xOffset: number;
+  /**
+   * Vertical offset in device px from the text baseline, positive downward.
+   * Only the outline path uses it; the `fillText` path leaves it 0.
+   */
+  yOffset?: number;
+  /**
+   * When present, the glyph is rastered from a font outline (HarfBuzz) rather
+   * than through `fillText`, and positioned at (xOffset, yOffset) with the tile
+   * carrying full ink and no per-cell crop.
+   */
+  outline?: OutlineGlyph;
   /**
    * Raster the cluster in a right-to-left context. Chromium's canvas only
    * applies a following joining context (a trailing ZWJ) when the context is
@@ -368,4 +436,11 @@ export interface ShaperHook {
   participates(codepoint: number): boolean;
   /** Shape one contiguous same-style run. `cells[i]` is the grapheme at column i. */
   shapeRun(cells: readonly string[], style: RunStyle): ShapedRun;
+  /**
+   * Receive the renderer's device-pixel geometry. Called by both backends after
+   * every measure and resize, before any `shapeRun`. Optional: a code-point
+   * shaper does not need it. An outline shaper stores it and lays glyphs at
+   * these coordinates.
+   */
+  setMetrics?(metrics: ShaperMetrics): void;
 }

@@ -20,7 +20,7 @@
 
 import { CellFlags } from '../types.ts';
 import type { RasterHint } from './instances.ts';
-import type { LineView, ShaperHook } from '../types.ts';
+import type { LineView, OutlineGlyph, ShaperHook } from '../types.ts';
 
 /** Bit flags packed into the per-column hint byte. */
 const HINT_RTL = 1;
@@ -33,12 +33,16 @@ export class RowShaper {
   /** Column span of the glyph at each column, 1 unless a ligature spans more. */
   private span = new Uint8Array(0);
   private xoff = new Float32Array(0);
+  /** Sub-baseline y offset in device px, outline (HarfBuzz) glyphs only. */
+  private yoff = new Float32Array(0);
   private clusters: string[] = [];
   private keys: string[] = [];
+  /** Per-column outline glyph, present only where the shaper rastered from a face. */
+  private outlines: (OutlineGlyph | undefined)[] = [];
   /** Scratch for the run's cell graphemes, handed to the shaper. */
   private cells: string[] = [];
   /** Reused raster hint, see hintFor. */
-  private readonly hint: RasterHint = { key: '', rtl: false, fitAdvance: false };
+  private readonly hint: RasterHint = { key: '', rtl: false, fitAdvance: false, outline: undefined };
   private planned = false;
 
   resize(cols: number): void {
@@ -48,8 +52,10 @@ export class RowShaper {
     this.hints = new Uint8Array(cols);
     this.span = new Uint8Array(cols);
     this.xoff = new Float32Array(cols);
+    this.yoff = new Float32Array(cols);
     this.clusters = new Array<string>(cols).fill('');
     this.keys = new Array<string>(cols).fill('');
+    this.outlines = new Array<OutlineGlyph | undefined>(cols).fill(undefined);
   }
 
   /**
@@ -112,6 +118,8 @@ export class RowShaper {
         this.hints[c] = (g.rtl ? HINT_RTL : 0) | (g.fitAdvance ? HINT_FIT : 0);
         this.span[c] = cols < 1 ? 1 : c + cols > n ? n - g.col : cols;
         this.xoff[c] = g.xOffset;
+        this.yoff[c] = g.yOffset ?? 0;
+        this.outlines[c] = g.outline;
         this.planned = true;
       }
       col = end;
@@ -130,6 +138,7 @@ export class RowShaper {
     h.key = this.keys[col];
     h.rtl = (this.hints[col] & HINT_RTL) !== 0;
     h.fitAdvance = (this.hints[col] & HINT_FIT) !== 0;
+    h.outline = this.outlines[col];
     return h;
   }
 
@@ -155,5 +164,13 @@ export class RowShaper {
   }
   xOffset(col: number): number {
     return this.xoff[col];
+  }
+  /** Sub-baseline y offset in device px for an outline glyph, else 0. */
+  yOffset(col: number): number {
+    return this.yoff[col];
+  }
+  /** The outline glyph at this column, or undefined on the fillText path. */
+  outline(col: number): OutlineGlyph | undefined {
+    return this.outlines[col];
   }
 }

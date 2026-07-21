@@ -98,6 +98,91 @@ xterm.js does not do contextual shaping at all, so this is now a small edge
 rather than parity. It is not a reason to pick vtgl if you need real bidi, which
 neither has.
 
+### HarfBuzz shaping: correct marks and joins, at a fixed byte cost
+
+`createHarfBuzzShaper()` is a second shaper, opt-in the same way. Where
+`arabicShaper()` selects a precomposed presentation form per cell and leans on
+the browser to draw it, this one runs the real HarfBuzz engine (harfbuzzjs
+1.4.0, HarfBuzz 14.2.1) over each run against a bundled Arabic face (Noto Sans
+Arabic, OFL), gets back glyph ids and positions, and rasters each glyph straight
+from its outline. It is async because HarfBuzz is a wasm module; await it once,
+then pass the result as `RendererOptions.shaper`.
+
+What it earns over the presentation-form path, all verified on screen on real
+Chromium and Firefox:
+
+- **GPOS mark placement.** Dots, hamza and madda are separate glyphs positioned
+  by the font's GPOS table, which precomposed forms cannot express at all. `بببب`
+  comes back as four beh bases each with its dot placed by the shaper, and the
+  four alef variants carry their diacritic where the face asks.
+- **A seam-free WebGL2 join.** Each shaped cluster (a base plus its marks) is
+  composited into one tile that carries its full ink and is sized larger than a
+  cell, and the tile is placed at the HarfBuzz pen position with no per-cell
+  crop. The connecting stroke overhangs freely, so a joined word is one
+  continuous stroke on WebGL2 with none of the per-cell notch the presentation
+  form path leaves there. (The Canvas2D backend already joined cleanly; this
+  makes WebGL2 match it.)
+- **Engine independence by construction.** HarfBuzz does the shaping, not the
+  browser, so Chromium and Firefox cannot diverge on glyph choice or position.
+  Measured on the full test grid: the two engines are within 0.04% of pixels on
+  WebGL2 and 0.005% on Canvas2D, the residual being rasterizer antialiasing.
+
+Architecture is **hybrid**: only runs the shaper claims (the Arabic block, the
+same `isArabic` test the presentation-form shaper uses) go through HarfBuzz.
+Latin, digits, box-drawing, block elements, emoji and every other cell stay on
+the renderer's existing code-point + `fillText` path, untouched. Verified: with
+the HarfBuzz shaper configured, non-Arabic content renders byte-for-byte
+identically to no shaper at all (0 differing pixels, 0 max channel delta). That
+is the hard no-regression guarantee, and it is why the existing golden-parity
+tests did not move: the HarfBuzz path is purely additive behind a new shaper.
+
+The correct long-term design is **shape-everything**: bundle a primary
+monospace face beside this Arabic one, put both in a fallback chain, and route
+every run through HarfBuzz so the browser never shapes anything. That
+generalises to programming ligatures and other complex scripts and removes the
+browser-shaping dependency for the whole grid. It is deferred here because it
+replaces the code-point raster path for all content, which is a larger change
+with real regression surface on the Latin path this hybrid keeps frozen; it
+needs the primary face's bytes bundled too. This is the documented next step.
+
+What it does not do:
+
+- **Not bidi.** As with the presentation-form shaper, HarfBuzz shapes a run in
+  one direction; it does not run the Unicode Bidirectional Algorithm. A run ends
+  at a non-Arabic cell, so word order across a space is still not reversed and a
+  full mixed sentence is not laid out correctly.
+- **Same reordering trade.** A run fills its cells left to right in visual
+  order, so `cellAtPixel` inside a shaped run still names a cell whose character
+  is elsewhere in the run. A host that needs selection to line up with the
+  buffer leaves the shaper off.
+- **One face, regular weight.** The bundled Noto Sans Arabic is regular; bold
+  and italic Arabic are not synthesised. A host may pass its own OFL/embeddable
+  face bytes via `HarfBuzzShaperOptions.fontBytes`.
+- **The run is fit to the grid.** A run is scaled uniformly so its advance fills
+  the cells the VT assigned it, which keeps the row aligned and every join
+  continuous. This is a gentler distortion than the per-cell squeeze the
+  presentation-form path applies, but it is still a horizontal fit: Arabic in a
+  monospace grid is distorted by construction.
+
+**Byte cost (measured, not optimized).** The engine and face are embedded so
+the vendor bundle stays self-contained. Against the pre-HarfBuzz vendor bundle
+(14.7 KB gzip), the HarfBuzz build is 371 KB gzip: about **+357 KB gzip added**.
+That is the wasm (161 KB gz), the full Noto Sans Arabic TTF (98 KB gz), the
+emscripten glue plus wrapper (18.5 KB gz), and roughly 78 KB of base64-inline
+overhead from embedding the binaries in the JS. Deferred size wins, none taken
+here: subset the font (HarfBuzz needs raw sfnt, not WOFF2, but a subset TTF is
+far smaller), load the wasm and font as separately fetched, lazily loaded chunks
+instead of base64 inline (removes the base64 overhead and keeps a Latin-only
+session from paying anything), and `wasm-opt -Oz`.
+
+**Runtime cost (measured on a real GPU, NVIDIA RTX 3070).** Shaping one run
+(`سلام`, four letters) is 7.7 µs steady-state; shaping runs once per changed
+line, so a screenful of Arabic is well under a millisecond. A full-grid redraw
+of the 40x17 test grid with Arabic shaped is 0.18 ms mean CPU in `render()`.
+Glyph rasterisation is per unique cluster tile and amortises into the atlas
+exactly like the code-point path. Neither is a hot-path concern; the fixed byte
+cost is the real trade, and it is deferred.
+
 ### Ligatures, selection, subpixel antialiasing
 
 The only ligature is Arabic lam-alef, described above: a shaped glyph now carries

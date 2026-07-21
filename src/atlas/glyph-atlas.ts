@@ -80,8 +80,12 @@ export class GlyphAtlas implements GlyphProvider {
     widthCols: number,
     hint?: RasterHint,
   ): AtlasRect | null {
-    const slotW = Math.max(1, widthCols) * this.font.cellW;
-    const slotH = this.font.cellH;
+    // An outline glyph carries its own tile size: the tile holds the cluster's
+    // full ink and is larger than a cell, which is what lets a joining stroke
+    // overhang with no per-cell crop (no WebGL2 seam). Everything else slots at
+    // cell width as before.
+    const slotW = hint?.outline ? hint.outline.tileW : Math.max(1, widthCols) * this.font.cellW;
+    const slotH = hint?.outline ? hint.outline.tileH : this.font.cellH;
     // A shaped glyph carries its own key: the same grapheme rastered with a
     // joining context or a fitted advance is a different picture, and the
     // shaper's key is what keeps the two from sharing a slot.
@@ -140,6 +144,18 @@ export class GlyphAtlas implements GlyphProvider {
   ): boolean {
     const ctx = this.font.ctx;
     ctx.clearRect(0, 0, slotW, slotH);
+
+    // An outline glyph (HarfBuzz) draws its composited cluster straight from the
+    // font outlines at the tile's pen origin, white for coverage so the shader
+    // tints it by the foreground like any other monochrome glyph. It never takes
+    // the fitAdvance squeeze the fillText path applies, because the run was
+    // already fit as a whole and the tile carries the glyph's true shape.
+    if (hint?.outline) {
+      ctx.fillStyle = '#ffffff';
+      hint.outline.draw(ctx, hint.outline.penX, hint.outline.penY);
+      this.upload(slotW, slotH, page, x, y);
+      return false;
+    }
 
     // Box-drawing and block elements are drawn to the slot rectangle rather
     // than rastered from the face. The slot is exactly the cell and the glyph

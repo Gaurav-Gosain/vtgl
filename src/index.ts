@@ -22,6 +22,8 @@ export { InstanceBuffers, StyleBit } from './renderer/instances.ts';
 export type { AtlasRect, GlyphProvider, RasterHint } from './renderer/instances.ts';
 export { RowShaper } from './renderer/runs.ts';
 export { arabicShaper, isArabic, joiningType } from './shaper/arabic.ts';
+export { createHarfBuzzShaper } from './shaper/harfbuzz.ts';
+export type { HarfBuzzShaperOptions } from './shaper/harfbuzz.ts';
 
 import { Canvas2DRenderer } from './renderer/canvas2d.ts';
 import { WebGL2Renderer } from './renderer/webgl2.ts';
