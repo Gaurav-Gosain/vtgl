@@ -9,7 +9,8 @@
 //   glyph:      8 x 32-bit per cell  (atlas rect, glyph offset, fg, style)
 //   decoration: 2 instances per cell (underline, strikethrough), 5 x 32-bit each
 // Blank/spacer cells emit zero-area glyph quads and undecorated cells emit
-// zero-area decoration quads, so a single full-grid instanced draw covers every cell with no per-cell branching on GPU.
+// zero-area decoration quads, so a single full-grid instanced draw covers
+// every cell with no per-cell branching on GPU.
 //
 // The streams are addressed by SLOT, a row index in [0, rows) that the renderer
 // maps to a screen row through a rotating base (see the row ring in
@@ -194,8 +195,8 @@ export class InstanceBuffers {
   /**
    * Recompute one slot (0..rows-1) reading absolute source row `absRow`. Fills
    * the slot's slice of all three streams. Blank/spacer cells get zero-area
-   * glyph quads and undecorated cells get zero-area decoration quads. Nothing written depends on which screen row
-   * the slot currently draws at.
+   * glyph quads and undecorated cells get zero-area decoration quads. Nothing
+   * written depends on which screen row the slot currently draws at.
    */
   buildRow(
     source: VtSource,
