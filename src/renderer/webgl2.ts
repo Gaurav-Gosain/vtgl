@@ -94,6 +94,10 @@ export class WebGL2Renderer implements Renderer {
   private cellH = 0;
   private baseline = 0;
   private deviceFontPx = 0;
+  // The geometry the current atlas was rastered at. Slot sizes and every glyph
+  // bitmap depend on it, and nothing else in a resize does, so a resize that
+  // leaves it unchanged keeps the atlas and its cached glyphs.
+  private atlasGeometry = '';
 
   private scheduler: RenderScheduler | null = null;
   private pendingFrame: { source: VtSource; viewportY: number } | null = null;
@@ -228,8 +232,10 @@ export class WebGL2Renderer implements Renderer {
     this.buffers.configure(this.cellW, this.cellH, this.baseline, this.dpr, this.opts.resolveInverse);
     if (this.dirtyFlags.length !== rows) this.dirtyFlags = new Uint8Array(rows);
     this.applyBackingStore();
-    // Cell geometry drove the atlas slot sizes; rebuild it fresh.
-    this.rebuildAtlas();
+    // Cell geometry drives the atlas slot sizes and the glyph rasters, so the
+    // atlas is rebuilt only when that geometry changed. A grid that only gains
+    // or loses columns or rows keeps every cached glyph.
+    if (!this.atlas || this.atlasGeometry !== this.geometryKey()) this.rebuildAtlas();
     this.sizeInstanceGpuBuffers();
     this.forceFull = true;
   }
@@ -902,6 +908,12 @@ export class WebGL2Renderer implements Renderer {
       fontFor: (mask) => this.fontFor(mask),
     };
     this.atlas = new GlyphAtlas(gl, font);
+    this.atlasGeometry = this.geometryKey();
+  }
+
+  /** Everything a rastered glyph depends on: cell size, baseline, DPR, font px. */
+  private geometryKey(): string {
+    return `${this.cellW}x${this.cellH}/${this.baseline}@${this.dpr}/${this.deviceFontPx}`;
   }
 
   private setupBgVao(): void {

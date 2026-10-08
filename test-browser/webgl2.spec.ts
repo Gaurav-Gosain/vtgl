@@ -279,6 +279,20 @@ test('the atlas caches glyphs: repeat frames upload nothing new', async ({ page 
   expect(a.afterNewGlyph, 'three unseen glyphs cost three uploads').toBe(3);
 });
 
+test('a resize that keeps the cell size keeps the atlas', async ({ page }) => {
+  const r = await page.evaluate(() => (window as any).harness.resizeAtlasProbe());
+  // 'abc', 'Hello, world' and '0123456789' hold 21 distinct glyphs, not
+  // counting the space, which draws no ink.
+  expect(r.first, 'the first frame rasters every distinct glyph').toBe(21);
+  expect(r.afterCols, 'one more column re-rasters nothing').toBe(0);
+  expect(r.afterRows, 'one more row re-rasters nothing').toBe(0);
+  expect(r.afterDpr, 'a DPR change re-rasters every glyph at the new scale').toBe(21);
+  expect(
+    r.keptDiff.differing,
+    `the kept atlas draws what a fresh renderer draws (max channel delta ${r.keptDiff.maxChannelDelta})`,
+  ).toBe(0);
+});
+
 test('context loss is survived and the renderer rebuilds on restore', async ({ page }) => {
   const r = await page.evaluate(() => (window as any).harness.contextLossProbe());
   expect(r.before).toBe('webgl2');

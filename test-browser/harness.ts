@@ -92,6 +92,19 @@ interface Harness {
   /** Ink on a blinking cell sampled across a blink period, in real pixels. */
   blinkProbe(backend: 'webgl2' | 'canvas2d'): Promise<{ inked: number; blank: number }>;
   atlasProbe(): { first: number; second: number; afterNewGlyph: number };
+  /**
+   * Atlas uploads across resizes. A change of columns or rows keeps the cell
+   * geometry, so its frame should raster nothing. A DPR change alters the
+   * geometry, so its frame rasters every glyph again. `keptDiff` compares the
+   * frame drawn from the kept atlas against a fresh renderer at the same size.
+   */
+  resizeAtlasProbe(): {
+    first: number;
+    afterCols: number;
+    afterRows: number;
+    afterDpr: number;
+    keptDiff: DiffResult;
+  };
   drawCallScaling(): Array<{ cells: number; drawCalls: number }>;
   /**
    * Renderer-only allocation pressure. Renders the same unchanging content with
@@ -1082,6 +1095,52 @@ const harness: Harness = {
     const afterNewGlyph = stats[stats.length - 1].atlasUploads;
     renderer.dispose();
     return { first, second, afterNewGlyph };
+  },
+
+  resizeAtlasProbe() {
+    const text = ['abc', 'Hello, world', '0123456789'];
+    const sourceAt = (cols: number, rows: number): FakeSource => {
+      const src = new FakeSource({ cols, rows, fg: 0xd0d0d0, bg: 0x101010 });
+      src.setCursor({ visible: false });
+      for (let r = 0; r < Math.min(rows, text.length); r++) src.writeText(r, 0, text[r]);
+      return src;
+    };
+    const renderer = build('webgl2');
+    const canvas = makeCanvas(8, 8);
+    renderer.mount(canvas);
+    renderer.resize(20, 3, 1);
+    const stats: RenderStats[] = [];
+    renderer.on('render', (s) => stats.push(s));
+    const uploads = (): number => stats[stats.length - 1].atlasUploads;
+
+    renderer.render(sourceAt(20, 3), 0);
+    const first = uploads();
+
+    // One column wider, as a window drag through a fit addon does.
+    renderer.resize(21, 3, 1);
+    const wide = sourceAt(21, 3);
+    renderer.render(wide, 0);
+    const afterCols = uploads();
+    const kept = readPixels(canvas);
+
+    renderer.resize(21, 4, 1);
+    renderer.render(sourceAt(21, 4), 0);
+    const afterRows = uploads();
+
+    // A DPR change rescales every glyph, so the atlas must start over.
+    renderer.resize(21, 4, 2);
+    renderer.render(sourceAt(21, 4), 0);
+    const afterDpr = uploads();
+    renderer.dispose();
+
+    const fresh = build('webgl2');
+    const freshCanvas = makeCanvas(8, 8);
+    fresh.mount(freshCanvas);
+    fresh.resize(21, 3, 1);
+    fresh.render(wide, 0);
+    const keptDiff = diff(kept, readPixels(freshCanvas), 0);
+    fresh.dispose();
+    return { first, afterCols, afterRows, afterDpr, keptDiff };
   },
 
   allocProbe(name, backend, frames) {
