@@ -4,7 +4,7 @@
 // a DOM or GPU. Browser pixel tests run separately under Playwright.
 
 export interface RecordedOp {
-  op: 'fillRect' | 'fillText' | 'clearRect' | 'drawImage';
+  op: 'fillRect' | 'fillText' | 'clearRect' | 'drawImage' | 'fill';
   x: number;
   y: number;
   w?: number;
@@ -51,6 +51,14 @@ export class RecordingContext2D {
     this.ops.push({ op: 'drawImage', x, y, fillStyle: this.fillStyle, font: this.font, globalAlpha: this.globalAlpha });
   }
 
+  /**
+   * An outline glyph from the HarfBuzz shaper, filled from a Path2D. Recorded
+   * with the pen the transform put it at, so a test can count shaped glyphs.
+   */
+  fill(): void {
+    this.ops.push({ op: 'fill', x: this.tx, y: this.ty, fillStyle: this.fillStyle, font: this.font, globalAlpha: this.globalAlpha });
+  }
+
   fillText(text: string, x: number, y: number): void {
     this.ops.push({ op: 'fillText', x, y, text, fillStyle: this.fillStyle, font: this.font, globalAlpha: this.globalAlpha });
   }
@@ -68,9 +76,29 @@ export class RecordingContext2D {
     };
   }
 
+  // The shaper places each outline glyph with save, translate, scale, fill and
+  // restore. Only the translation is tracked, for the pen of a recorded fill.
+  private tx = 0;
+  private ty = 0;
+  private readonly stack: Array<[number, number]> = [];
+
+  save(): void {
+    this.stack.push([this.tx, this.ty]);
+  }
+
+  restore(): void {
+    const top = this.stack.pop();
+    if (top) [this.tx, this.ty] = top;
+  }
+
+  translate(x: number, y: number): void {
+    this.tx += x;
+    this.ty += y;
+  }
+
+  scale(): void {}
+
   // Methods the renderer may touch but the tests ignore.
-  save(): void {}
-  restore(): void {}
   beginPath(): void {}
   rect(): void {}
   clip(): void {}

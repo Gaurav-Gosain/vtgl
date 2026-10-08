@@ -5,6 +5,7 @@ import { Canvas2DRenderer } from '../src/renderer/canvas2d.ts';
 import { makeFakeCanvas } from '../src/testing/fake-canvas.ts';
 import { FakeSource } from '../src/testing/fake-source.ts';
 import { scenarios } from '../src/testing/scenarios.ts';
+import { createHarfBuzzShaper } from '../src/shaper/harfbuzz.ts';
 import { CellFlags } from '../src/types.ts';
 import type { RenderStats } from '../src/types.ts';
 
@@ -47,6 +48,36 @@ test('every golden scenario renders on the recording canvas', () => {
       source.clearDirty();
     }
     assert.ok(canvas.context.ops.length > 0, `${sc.name} drew something`);
+  }
+});
+
+test('every golden scenario renders on the recording canvas with the HarfBuzz shaper', async () => {
+  // The shaper draws an outline glyph with translate, scale and fill(Path2D).
+  // Path2D is browser-only, so a stand-in lets the outline path run in node.
+  const g = globalThis as { Path2D?: unknown };
+  const saved = g.Path2D;
+  g.Path2D = class {
+    constructor(_d?: string) {}
+  };
+  try {
+    const shaper = await createHarfBuzzShaper();
+    for (const sc of scenarios) {
+      const source = sc.build();
+      const canvas = makeFakeCanvas();
+      const renderer = new Canvas2DRenderer({ fontFamily: 'monospace', fontSize: 14, dpr: 2, theme: THEME, shaper });
+      renderer.mount(canvas as unknown as HTMLCanvasElement);
+      renderer.resize(sc.cols, sc.rows, 2);
+      for (let f = 0; f < 3; f++) {
+        sc.step?.(source, f);
+        assert.doesNotThrow(() => renderer.render(source, source.scrollbackRows), `${sc.name} frame ${f}`);
+        source.clearDirty();
+      }
+      if (sc.name === 'arabic') {
+        assert.ok(canvas.context.count('fill') > 0, 'arabic draws outline glyphs');
+      }
+    }
+  } finally {
+    g.Path2D = saved;
   }
 });
 
