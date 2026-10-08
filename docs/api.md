@@ -22,8 +22,8 @@ Call order is `mount` then `resize` then `render`. `render()` before `mount()`
 throws. `resize()` before `mount()` records the geometry but cannot size GPU
 buffers or build an atlas, so it is not useful on its own. If the source's
 `cols`/`rows` disagree with the last `resize()`, `render()` adopts the source's
-dimensions and resizes itself, which forces a full redraw and rebuilds the
-atlas.
+dimensions and resizes itself, which forces a full redraw. The WebGL2 atlas is
+rebuilt only when the cell size, baseline or DPR change.
 
 ## VtSource
 
@@ -199,8 +199,16 @@ before the frame fires. `flushRender` runs a booked frame immediately, which is
 what you want before an observable side effect such as a resize or a teardown.
 
 `resize` and `setTheme` both force a full redraw on the next frame. On the WebGL2
-path `resize` additionally reallocates instance buffers, resizes the backing
-store, and rebuilds the atlas, since cell geometry determined the slot sizes.
+path `resize` also reallocates instance buffers and resizes the backing store.
+It rebuilds the atlas only when the cell width, cell height, baseline, DPR or
+device font size change, because that geometry sets the slot sizes. A resize
+that changes only the column or row count keeps every rastered glyph.
+
+The font family is fixed when you construct the renderer, and no call clears
+the atlas for a new font. If a web font loads after the first frame, glyphs
+already rastered in a fallback font stay in the atlas. Wait for the font to load
+(for example with `document.fonts.load`) before you construct the renderer, or
+construct a new renderer when the font changes.
 
 `dispose` cancels any booked frame, removes the context-loss listeners, deletes
 programs, buffers, vertex array objects and the atlas texture, and clears all

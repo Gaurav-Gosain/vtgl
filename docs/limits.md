@@ -323,6 +323,14 @@ pixel ratio destroys the atlas and creates a fresh one, re-rastering every
 visible glyph over the following frames. Moving a window between displays with
 different scaling therefore costs a full atlas rebuild, not a texture resample.
 
+### A font that loads late stays in its fallback
+
+`resize()` keeps the atlas when the cell geometry does not change, and the
+font family is fixed at construction. If a web font finishes loading after the
+first frame and its cell metrics match the fallback's, glyphs already rastered
+in the fallback stay in the atlas. Wait for the font before you construct the
+renderer, or construct a new renderer when the font changes.
+
 ### Full-screen repaints cannot be made cheaper by damage tracking
 
 A colored log scrolling past genuinely dirties every row every frame, which the

@@ -239,7 +239,7 @@ renderer.on('render', (s) => {
 });
 ```
 
-Both examples assume a source whose grid matches the size passed to `resize()`. If it does not, `render()` adopts the source's `cols` and `rows` and resizes itself, which forces a full redraw and, on the WebGL2 path, rebuilds the atlas. For experimenting before a VT is wired up, `FakeSource` in [src/testing/fake-source.ts](src/testing/fake-source.ts) is a scriptable absolute grid implementing `VtSource`, and [src/testing/scenarios.ts](src/testing/scenarios.ts) builds nine populated grids from it.
+Both examples assume a source whose grid matches the size passed to `resize()`. If it does not, `render()` adopts the source's `cols` and `rows` and resizes itself, which forces a full redraw. On the WebGL2 path, the atlas is rebuilt only when the cell size, baseline or DPR change. For experimenting before a VT is wired up, `FakeSource` in [src/testing/fake-source.ts](src/testing/fake-source.ts) is a scriptable absolute grid implementing `VtSource`, and [src/testing/scenarios.ts](src/testing/scenarios.ts) builds nine populated grids from it.
 
 ## The VtSource contract
 
