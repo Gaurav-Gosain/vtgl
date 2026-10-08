@@ -17,6 +17,8 @@ export interface RecordedOp {
 
 export class RecordingContext2D {
   fillStyle = '#000000';
+  strokeStyle = '#000000';
+  lineWidth = 1;
   font = '10px monospace';
   globalAlpha = 1;
   textBaseline: CanvasTextBaseline = 'alphabetic';
@@ -72,6 +74,11 @@ export class RecordingContext2D {
   beginPath(): void {}
   rect(): void {}
   clip(): void {}
+  // Path calls from the box-drawing arcs and diagonals (see box-drawing.ts).
+  moveTo(): void {}
+  lineTo(): void {}
+  arcTo(): void {}
+  stroke(): void {}
 
   reset(): void {
     this.ops.length = 0;

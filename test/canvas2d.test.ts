@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { Canvas2DRenderer } from '../src/renderer/canvas2d.ts';
 import { makeFakeCanvas } from '../src/testing/fake-canvas.ts';
 import { FakeSource } from '../src/testing/fake-source.ts';
+import { scenarios } from '../src/testing/scenarios.ts';
 import { CellFlags } from '../src/types.ts';
 import type { RenderStats } from '../src/types.ts';
 
@@ -28,6 +29,25 @@ test('renders visible glyphs and reports full frame on first paint', () => {
   assert.ok(stats);
   assert.equal(stats!.full, true);
   assert.equal(canvas.context.texts().join(''), 'hello');
+});
+
+test('every golden scenario renders on the recording canvas', () => {
+  // `npm run bench` drives these scenarios through this same canvas. The
+  // box-drawing arcs in `blocks` stroke a path, so the recording canvas has to
+  // take path calls as well as fills.
+  for (const sc of scenarios) {
+    const source = sc.build();
+    const canvas = makeFakeCanvas();
+    const renderer = new Canvas2DRenderer({ fontFamily: 'monospace', fontSize: 14, dpr: 2, theme: THEME });
+    renderer.mount(canvas as unknown as HTMLCanvasElement);
+    renderer.resize(sc.cols, sc.rows, 2);
+    for (let f = 0; f < 3; f++) {
+      sc.step?.(source, f);
+      assert.doesNotThrow(() => renderer.render(source, source.scrollbackRows), `${sc.name} frame ${f}`);
+      source.clearDirty();
+    }
+    assert.ok(canvas.context.ops.length > 0, `${sc.name} drew something`);
+  }
 });
 
 test('blank cells with default background draw no glyph and no fill', () => {
