@@ -159,6 +159,16 @@ interface Harness {
   arabicFormImages(backend: 'webgl2' | 'canvas2d'): string[];
   /** The corpus as a PNG data URL, for eyeballing the rendered output. */
   torturePng(backend: 'webgl2' | 'canvas2d', shaped: boolean): string;
+  /**
+   * Draw `\e[4m a b \e[0m` on row 0 and the same text struck through on row 1,
+   * and report the ink in every cell of both rows. The spaces are cells 0, 2
+   * and 4; cells 5 and up are undecorated spaces.
+   */
+  decorationInk(backend: 'webgl2' | 'canvas2d'): {
+    underline: number[];
+    strike: number[];
+    cellWidth: number;
+  };
   /** Row index and cell height of the corpus, so a caller can crop one entry. */
   tortureGeometry(): { index: Record<string, number>; cellHeight: number; cellWidth: number };
   bench(
@@ -1329,6 +1339,32 @@ const harness: Harness = {
       plain: differing(plain, reference),
       total: reference.width * reference.height,
     };
+  },
+
+  decorationInk(backend) {
+    const cols = 8;
+    const source = new FakeSource({ cols, rows: 2, fg: 0xffffff, bg: 0x101010 });
+    source.clearRegion(0, 2);
+    source.writeText(0, 0, ' a b ', { flags: CellFlags.UNDERLINE });
+    source.writeText(1, 0, ' a b ', { flags: CellFlags.STRIKETHROUGH });
+    // The cursor would otherwise sit on cell 0 and ink it on its own.
+    source.setCursor({ visible: false });
+    const renderer = build(backend);
+    const canvas = makeCanvas(8, 8);
+    renderer.mount(canvas);
+    renderer.resize(cols, 2, 1);
+    renderer.render(source, 0);
+    const m = renderer.getMetrics();
+    const metrics = { cellWidth: m.cellWidth, cellHeight: m.cellHeight };
+    const px = readPixels(canvas);
+    const underline: number[] = [];
+    const strike: number[] = [];
+    for (let col = 0; col < cols; col++) {
+      underline.push(inkIn(px, metrics, 0, col, 1));
+      strike.push(inkIn(px, metrics, 1, col, 1));
+    }
+    renderer.dispose();
+    return { underline, strike, cellWidth: m.cellWidth };
   },
 
   tortureGeometry() {

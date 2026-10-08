@@ -8,8 +8,8 @@
 //   background: 1 uint32 per cell (packed 0xRRGGBB), cell derived from InstanceID
 //   glyph:      8 x 32-bit per cell  (atlas rect, glyph offset, fg, style)
 //   decoration: 2 instances per cell (underline, strikethrough), 5 x 32-bit each
-// Blank/spacer cells and undecorated cells emit zero-area quads, so a single
-// full-grid instanced draw covers every cell with no per-cell branching on GPU.
+// Blank/spacer cells emit zero-area glyph quads and undecorated cells emit
+// zero-area decoration quads, so a single full-grid instanced draw covers every cell with no per-cell branching on GPU.
 //
 // The streams are addressed by SLOT, a row index in [0, rows) that the renderer
 // maps to a screen row through a rotating base (see the row ring in
@@ -193,8 +193,8 @@ export class InstanceBuffers {
 
   /**
    * Recompute one slot (0..rows-1) reading absolute source row `absRow`. Fills
-   * the slot's slice of all three streams. Blank/spacer cells and undecorated
-   * cells become zero-area quads. Nothing written depends on which screen row
+   * the slot's slice of all three streams. Blank/spacer cells get zero-area
+   * glyph quads and undecorated cells get zero-area decoration quads. Nothing written depends on which screen row
    * the slot currently draws at.
    */
   buildRow(
@@ -244,8 +244,28 @@ export class InstanceBuffers {
         this.bg[cellIdx + 1] = bg & 0xffffff;
       }
 
-      const blank = cp === 0 || cp === 32;
-      if (blank || flags & CellFlags.INVISIBLE) continue;
+      if (flags & CellFlags.INVISIBLE) continue;
+
+      // Decorations as solid quads spanning the cell's columns. y is relative
+      // to the row top; the shader adds the row offset (see the row ring).
+      // They come before the blank test because a decoration belongs to the
+      // cell, not to its glyph: an underlined space draws its underline, as it
+      // does in xterm.js and ghostty.
+      if (flags & (CellFlags.UNDERLINE | CellFlags.STRIKETHROUGH)) {
+        const x = col * this.cellW;
+        const span = spanCols * this.cellW;
+        const thickness = Math.max(1, Math.round(this.dpr));
+        if (flags & CellFlags.UNDERLINE) {
+          const uy = Math.min(this.cellH - thickness, this.baseline + thickness);
+          this.writeDeco(dBase, x, uy, span, thickness, fg);
+        }
+        if (flags & CellFlags.STRIKETHROUGH) {
+          const sy = Math.round(this.cellH * 0.5);
+          this.writeDeco(dBase + DECO_UNITS, x, sy, span, thickness, fg);
+        }
+      }
+
+      if (cp === 0 || cp === 32) continue;
 
       // A shaped column draws the shaper's cluster under the shaper's key. The
       // cell it came from may be elsewhere in the run, but a run is uniform in
@@ -265,7 +285,6 @@ export class InstanceBuffers {
       );
       if (rect === null) continue; // could not place; drawn as blank this frame
 
-      const x = col * this.cellW;
       // Atlas rect (texels == device px), no per-cell offset in the default path.
       this.glyphF32[gBase + 0] = rect.x;
       this.glyphF32[gBase + 1] = rect.y;
@@ -292,21 +311,6 @@ export class InstanceBuffers {
       }
       this.glyphU32[gBase + 7] = style;
       glyphs++;
-
-      // Decorations as solid quads spanning the glyph's columns. y is relative
-      // to the row top; the shader adds the row offset (see the row ring).
-      if (flags & (CellFlags.UNDERLINE | CellFlags.STRIKETHROUGH)) {
-        const span = spanCols * this.cellW;
-        const thickness = Math.max(1, Math.round(this.dpr));
-        if (flags & CellFlags.UNDERLINE) {
-          const uy = Math.min(this.cellH - thickness, this.baseline + thickness);
-          this.writeDeco(dBase, x, uy, span, thickness, fg);
-        }
-        if (flags & CellFlags.STRIKETHROUGH) {
-          const sy = Math.round(this.cellH * 0.5);
-          this.writeDeco(dBase + DECO_UNITS, x, sy, span, thickness, fg);
-        }
-      }
     }
 
     // Keep the running blink total in step with this slot's new contents, so

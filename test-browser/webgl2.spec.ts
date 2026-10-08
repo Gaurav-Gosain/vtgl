@@ -540,3 +540,27 @@ test('every torture cluster draws ink on both backends', async ({ page }) => {
     }
   }
 });
+
+// Issue #2: an underline belongs to the cell, so `\e[4m a b \e[0m` draws one
+// unbroken line across all five cells, spaces included, as xterm.js and
+// ghostty do. Strikethrough follows the same rule.
+for (const backend of ['webgl2', 'canvas2d'] as const) {
+  test(`underline and strikethrough draw under spaces: ${backend}`, async ({ page }) => {
+    const ink: { underline: number[]; strike: number[]; cellWidth: number } =
+      await page.evaluate((b) => (window as any).harness.decorationInk(b), backend);
+    // A one pixel line across the whole cell, less a pixel for rounding at the
+    // cell edges.
+    const line = Math.floor(ink.cellWidth) - 1;
+    for (const [kind, cells] of [
+      ['underline', ink.underline],
+      ['strikethrough', ink.strike],
+    ] as const) {
+      for (const col of [0, 2, 4]) {
+        expect(cells[col], `${kind} under the space in cell ${col}`).toBeGreaterThanOrEqual(line);
+      }
+      for (let col = 5; col < cells.length; col++) {
+        expect(cells[col], `${kind} past the styled text, cell ${col}`).toBe(0);
+      }
+    }
+  });
+}

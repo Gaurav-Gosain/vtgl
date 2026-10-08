@@ -316,10 +316,16 @@ export class Canvas2DRenderer implements Renderer {
       }
 
       const blank = cp === 0 || cp === 32;
+      // A decoration belongs to the cell, not to its glyph, so an underlined
+      // space still draws its underline, as it does in xterm.js and ghostty.
+      const decorated =
+        flags & (CellFlags.UNDERLINE | CellFlags.STRIKETHROUGH) &&
+        !(flags & CellFlags.INVISIBLE);
 
-      // Blank-cell fast skip: nothing to paint when the cell is empty and its
-      // background matches the default (already covered by the band fill).
-      if (blank && bg === defaultBg) continue;
+      // Blank-cell fast skip: nothing to paint when the cell is empty, carries
+      // no decoration, and its background matches the default (already covered
+      // by the band fill).
+      if (blank && bg === defaultBg && !decorated) continue;
 
       const x = col * this.cellW;
       const span = width === 2 ? this.cellW * 2 : this.cellW;
@@ -329,7 +335,10 @@ export class Canvas2DRenderer implements Renderer {
         ctx.fillRect(x, y, span, this.cellH);
       }
 
-      if (blank || flags & CellFlags.INVISIBLE) continue;
+      if (blank || flags & CellFlags.INVISIBLE) {
+        if (decorated) this.drawDecorations(ctx, flags, x, y, span, fg);
+        continue;
+      }
 
       // Blink hides the glyph for half of each phase, matching the alpha gate in
       // the WebGL2 glyph shader. Decorations keep drawing there, so they do here.
@@ -344,9 +353,8 @@ export class Canvas2DRenderer implements Renderer {
       // style, so the colours and flags read above still apply.
       const isShaped = shaped !== undefined && shaped.has(col);
       const grapheme = isShaped ? shaped.cluster(col) : line.grapheme(col);
-      if (grapheme.length === 0) continue;
 
-      if (!blinking || blinkOn) {
+      if (grapheme.length !== 0 && (!blinking || blinkOn)) {
         ctx.font = this.font(flags);
         const alpha = flags & CellFlags.FAINT ? 0.5 : 1;
         if (alpha !== 1) ctx.globalAlpha = alpha;
@@ -356,9 +364,7 @@ export class Canvas2DRenderer implements Renderer {
         glyphs++;
       }
 
-      if (flags & (CellFlags.UNDERLINE | CellFlags.STRIKETHROUGH)) {
-        this.drawDecorations(ctx, flags, x, y, span, fg);
-      }
+      if (decorated) this.drawDecorations(ctx, flags, x, y, span, fg);
     }
     return glyphs;
   }
