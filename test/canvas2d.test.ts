@@ -279,11 +279,16 @@ test('re-rendering the same viewport does not force a full frame', () => {
   assert.equal(stats!.dirtyRows, 0);
 });
 
-test('a blinking cell toggles with the clock and the flip drives its own repaint', async () => {
-  // The renderer owns no clock: the phase only advances on screen because this
-  // loop keeps asking for frames, which is exactly what a host has to do. What
-  // is asserted is that the glyph is drawn in one phase and skipped in the
-  // other, and that the flip repaints without the source dirtying anything.
+test('a blinking cell toggles with the clock and the flip drives its own repaint', (t) => {
+  // The renderer owns no clock: it reads performance.now() on each render, and
+  // the phase only advances on screen because the host keeps asking for frames.
+  // The test drives that clock by hand, so the result does not depend on how
+  // fast the machine runs. What is asserted is that the glyph is drawn in one
+  // phase and skipped in the other, and that each flip, and only a flip,
+  // repaints without the source dirtying anything.
+  let clock = 0;
+  t.mock.method(performance, 'now', () => clock);
+
   const { canvas, renderer, source } = setup(4, 1);
   source.setCell(0, 0, 'B'.codePointAt(0)!, { flags: CellFlags.BLINK });
   renderer.render(source, 0);
@@ -291,26 +296,33 @@ test('a blinking cell toggles with the clock and the flip drives its own repaint
 
   let drawn = 0;
   let skipped = 0;
-  let repaintedOnFlip = false;
+  let flips = 0;
+  let repaints = 0;
   let stats: RenderStats | undefined;
   renderer.on('render', (s) => (stats = s));
 
-  // One full blink period is 500 ms; sample past two of them.
-  const deadline = Date.now() + 1200;
-  while (Date.now() < deadline && (drawn === 0 || skipped === 0)) {
+  // The phase flips every 250 ms. Two full periods at 50 ms steps see 4 flips.
+  const visibleAt = (ms: number): boolean => (ms / 500) % 1 >= 0.5;
+  for (let ms = 50; ms <= 1000; ms += 50) {
+    clock = ms;
+    if (visibleAt(ms) !== visibleAt(ms - 50)) flips++;
     canvas.context.reset();
     renderer.render(source, 0);
-    if (stats!.dirtyRows > 0) {
-      if (canvas.context.texts().includes('B')) drawn++;
-      else skipped++;
-      repaintedOnFlip = true;
-    }
-    await new Promise((r) => setTimeout(r, 20));
+    if (stats!.dirtyRows === 0) continue;
+    repaints++;
+    if (canvas.context.texts().includes('B')) drawn++;
+    else skipped++;
+    assert.equal(
+      canvas.context.texts().includes('B'),
+      visibleAt(ms),
+      `at ${ms} ms the glyph follows the phase`,
+    );
   }
 
+  assert.equal(flips, 4);
   assert.ok(drawn > 0, 'the blinking cell is drawn in its visible phase');
   assert.ok(skipped > 0, 'and skipped in the other');
-  assert.ok(repaintedOnFlip, 'the phase flip repaints without the source dirtying a row');
+  assert.equal(repaints, flips, 'each phase flip repaints, and nothing else does');
 });
 
 test('a non-blinking screen never repaints itself on the clock', () => {
