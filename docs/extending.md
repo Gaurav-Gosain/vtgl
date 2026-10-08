@@ -62,7 +62,7 @@ that wants to pin one, or to run both side by side (which is how pixel parity is
 tested), constructs them directly:
 
 ```ts
-import { WebGL2Renderer, Canvas2DRenderer, supportsWebGL2 } from 'vtgl';
+import { WebGL2Renderer, Canvas2DRenderer, supportsWebGL2 } from '@gaurav-gosain/vtgl';
 
 const renderer = supportsWebGL2() && !forceFallback
   ? new WebGL2Renderer(options)
@@ -104,7 +104,7 @@ It is also how the instance builder is tested without a GPU: unit tests pass a
 fake provider that hands back deterministic rects.
 
 ```ts
-import { InstanceBuffers } from 'vtgl';
+import { InstanceBuffers } from '@gaurav-gosain/vtgl';
 
 const buffers = new InstanceBuffers();
 buffers.resize(cols, rows);

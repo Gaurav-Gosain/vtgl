@@ -167,8 +167,9 @@ npm run build:vendor   # dist/vtgl.vendor.js (33 KB minified, dependency-free)
 
 Node 24 or newer is required for the type-stripping test runner; the build itself needs only esbuild and typescript.
 
-The examples below import from `vtgl`, which is the package name in
-`package.json`. Since there is nothing to install from the registry, make that
+The examples below import from `@gaurav-gosain/vtgl`, which is the package
+name in `package.json`. The name has a scope because the bare name `vtgl` is
+not ours on the registry. Since there is nothing to install from the registry, make that
 specifier resolve by installing the checkout itself (`npm install /path/to/vtgl`
 from your project), or import `dist/index.js` by path. `dist/vtgl.vendor.js` is
 minified ESM with the same named exports, so a page served over http can
@@ -179,7 +180,7 @@ with no npm involved at all. That last route needs a real origin rather than a
 A minimal mount, in order (`mount` before `resize`, `resize` before `render`):
 
 ```ts
-import { createRenderer } from 'vtgl';
+import { createRenderer } from '@gaurav-gosain/vtgl';
 
 const canvas = document.querySelector('canvas')!;
 
@@ -323,7 +324,7 @@ interface Renderer {
 Arabic joining is off unless you ask for it:
 
 ```ts
-import { createRenderer, arabicShaper } from 'vtgl';
+import { createRenderer, arabicShaper } from '@gaurav-gosain/vtgl';
 
 const renderer = createRenderer({
   fontFamily: 'monospace',

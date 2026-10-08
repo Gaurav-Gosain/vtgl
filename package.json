@@ -1,5 +1,5 @@
 {
-  "name": "vtgl",
+  "name": "@gaurav-gosain/vtgl",
   "version": "0.0.0",
   "description": "Standalone WebGL2 glyph-atlas terminal renderer driven by a pluggable read-only VT source.",
   "type": "module",
