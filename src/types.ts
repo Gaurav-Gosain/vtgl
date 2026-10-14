@@ -70,7 +70,12 @@ export interface LineView {
   flags(col: number): number;
 }
 
-export type CursorShape = 'block' | 'bar' | 'underline';
+/**
+ * How the cursor is drawn. `outline` is a hollow block: the cell's border and
+ * nothing inside it, which is how a terminal shows the cursor of a window that
+ * does not have the focus.
+ */
+export type CursorShape = 'block' | 'bar' | 'underline' | 'outline';
 
 export interface CursorState {
   /** Column, 0-based, in the active screen. */

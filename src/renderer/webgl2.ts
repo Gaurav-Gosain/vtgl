@@ -143,7 +143,8 @@ export class WebGL2Renderer implements Renderer {
 
   // Scratch for dirty-run coalescing and cursor instances (preallocated).
   private dirtyFlags = new Uint8Array(0);
-  private readonly cursorRectF32 = new Float32Array(5);
+  // Room for four rects: an outline cursor is its cell's four edges.
+  private readonly cursorRectF32 = new Float32Array(5 * 4);
   private readonly cursorRectU32 = new Uint32Array(this.cursorRectF32.buffer);
   private readonly cursorGlyphF32 = new Float32Array(GLYPH_UNITS);
   private readonly cursorGlyphU32 = new Uint32Array(this.cursorGlyphF32.buffer);
@@ -673,30 +674,42 @@ export class WebGL2Renderer implements Renderer {
     const thickness = Math.max(1, Math.round(this.dpr * 2));
     let calls = 0;
 
-    // Cursor rect.
-    let rx = x;
-    let ry = y;
-    let rw = this.cellW;
-    let rh = this.cellH;
+    // Cursor rects: one for a block, a bar or an underline, and the cell's
+    // four edges for an outline.
+    const f = this.cursorRectF32;
+    const u = this.cursorRectU32;
+    const color = this.theme.cursor & 0xffffff;
+    let rects = 0;
+    const rect = (rx: number, ry: number, rw: number, rh: number): void => {
+      const o = rects++ * 5;
+      f[o] = rx;
+      f[o + 1] = ry;
+      f[o + 2] = rw;
+      f[o + 3] = rh;
+      u[o + 4] = color;
+    };
     if (shape === 'bar') {
-      rw = thickness;
+      rect(x, y, thickness, this.cellH);
     } else if (shape === 'underline') {
-      ry = y + this.cellH - thickness;
-      rh = thickness;
+      rect(x, y + this.cellH - thickness, this.cellW, thickness);
+    } else if (shape === 'outline') {
+      // One device pixel per CSS pixel, the weight of the cell grid itself.
+      const edge = Math.max(1, Math.round(this.dpr));
+      rect(x, y, this.cellW, edge);
+      rect(x, y + this.cellH - edge, this.cellW, edge);
+      rect(x, y + edge, edge, this.cellH - 2 * edge);
+      rect(x + this.cellW - edge, y + edge, edge, this.cellH - 2 * edge);
+    } else {
+      rect(x, y, this.cellW, this.cellH);
     }
-    this.cursorRectF32[0] = rx;
-    this.cursorRectF32[1] = ry;
-    this.cursorRectF32[2] = rw;
-    this.cursorRectF32[3] = rh;
-    this.cursorRectU32[4] = this.theme.cursor & 0xffffff;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.cursorRectBuf);
-    gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.cursorRectF32);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, f, 0, rects * 5);
     {
       const p = this.solidProg!;
       gl.useProgram(p.prog);
       gl.uniform2f(p.u.u_resolution, this.cols * this.cellW, this.rows * this.cellH);
       gl.bindVertexArray(this.cursorRectVao);
-      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, 1);
+      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, rects);
       calls++;
     }
 
@@ -844,7 +857,7 @@ export class WebGL2Renderer implements Renderer {
 
     // Fixed-size cursor buffers.
     gl.bindBuffer(gl.ARRAY_BUFFER, this.cursorRectBuf);
-    gl.bufferData(gl.ARRAY_BUFFER, DECO_UNITS * 4, gl.DYNAMIC_DRAW);
+    gl.bufferData(gl.ARRAY_BUFFER, this.cursorRectF32.byteLength, gl.DYNAMIC_DRAW);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.cursorGlyphBuf);
     gl.bufferData(gl.ARRAY_BUFFER, GLYPH_UNITS * 4, gl.DYNAMIC_DRAW);
 
@@ -1038,7 +1051,7 @@ function get2d(canvas: AnyCanvas): Ctx2D {
 }
 
 function cursorShapeBit(shape: string): number {
-  return shape === 'bar' ? 1 : shape === 'underline' ? 2 : 0;
+  return shape === 'bar' ? 1 : shape === 'underline' ? 2 : shape === 'outline' ? 3 : 0;
 }
 
 /** Euclidean modulo: the scroll delta may be negative. */

@@ -164,6 +164,16 @@ interface Harness {
    * and report the ink in every cell of both rows. The spaces are cells 0, 2
    * and 4; cells 5 and up are undecorated spaces.
    */
+  /**
+   * Draw a cursor of `shape` in the middle cell of a blank 3x3 grid and report
+   * which device pixels of each cell carry the cursor colour, as rows of `#`
+   * and `.`. The middle cell is the cursor's; the other eight must stay clean.
+   */
+  cursorPixels(
+    backend: 'webgl2' | 'canvas2d',
+    shape: 'block' | 'bar' | 'underline' | 'outline',
+    dpr: number,
+  ): { cell: string[]; neighbours: number; cellWidth: number; cellHeight: number };
   decorationInk(backend: 'webgl2' | 'canvas2d'): {
     underline: number[];
     strike: number[];
@@ -1339,6 +1349,41 @@ const harness: Harness = {
       plain: differing(plain, reference),
       total: reference.width * reference.height,
     };
+  },
+
+  cursorPixels(backend, shape, dpr) {
+    const cursor = 0xff00ff;
+    const source = new FakeSource({ cols: 3, rows: 3, fg: 0xd0d0d0, bg: 0x101010 });
+    source.clearRegion(0, 3);
+    source.setCursor({ visible: true, x: 1, y: 1, shape });
+    const renderer = build(backend, { ...BASE_OPTIONS, dpr, theme: { ...THEME, cursor } });
+    const canvas = makeCanvas(8, 8);
+    renderer.mount(canvas);
+    renderer.resize(3, 3, dpr);
+    renderer.render(source, 0);
+    const m = renderer.getMetrics();
+    const px = readPixels(canvas);
+    renderer.dispose();
+    canvas.remove();
+    const isCursor = (x: number, y: number): boolean => {
+      const i = (y * px.width + x) * 4;
+      return px.data[i] > 0xc0 && px.data[i + 1] < 0x40 && px.data[i + 2] > 0xc0;
+    };
+    const cell: string[] = [];
+    for (let y = m.cellHeight; y < 2 * m.cellHeight; y++) {
+      let line = '';
+      for (let x = m.cellWidth; x < 2 * m.cellWidth; x++) line += isCursor(x, y) ? '#' : '.';
+      cell.push(line);
+    }
+    let neighbours = 0;
+    for (let y = 0; y < px.height; y++) {
+      for (let x = 0; x < px.width; x++) {
+        const inside =
+          x >= m.cellWidth && x < 2 * m.cellWidth && y >= m.cellHeight && y < 2 * m.cellHeight;
+        if (!inside && isCursor(x, y)) neighbours++;
+      }
+    }
+    return { cell, neighbours, cellWidth: m.cellWidth, cellHeight: m.cellHeight };
   },
 
   decorationInk(backend) {

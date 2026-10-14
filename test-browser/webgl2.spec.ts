@@ -564,3 +564,57 @@ for (const backend of ['webgl2', 'canvas2d'] as const) {
     }
   });
 }
+
+// Every cursor shape on both backends, at two device pixel ratios. The shape is
+// read back from the cursor colour in the pixels: a block fills its cell, a bar
+// is a column at the left edge, an underline is a row at the bottom, and an
+// outline is the cell's border with nothing inside it, which is how a terminal
+// draws the cursor of a window without the focus. Lines scale with the ratio.
+for (const backend of ['webgl2', 'canvas2d'] as const) {
+  for (const dpr of [1, 2]) {
+    test(`every cursor shape draws where it belongs: ${backend} at dpr ${dpr}`, async ({ page }) => {
+      type Pixels = { cell: string[]; neighbours: number };
+      const read = (shape: string): Promise<Pixels> =>
+        page.evaluate(
+          ([b, sh, d]) => (window as any).harness.cursorPixels(b, sh, d),
+          [backend, shape, dpr] as const,
+        );
+      const full = (line: string) => /^#+$/.test(line);
+      const empty = (line: string) => /^\.+$/.test(line);
+      const column = (cell: string[], x: number) => cell.map((line) => line[x]).join('');
+
+      const block = await read('block');
+      expect(block.neighbours, 'block outside its cell').toBe(0);
+      expect(block.cell.every(full), `block:\n${block.cell.join('\n')}`).toBe(true);
+
+      const bar = await read('bar');
+      expect(bar.neighbours, 'bar outside its cell').toBe(0);
+      const barWidth = bar.cell[0].indexOf('.');
+      expect(bar.cell.every((line) => line === bar.cell[0]), `bar:\n${bar.cell.join('\n')}`).toBe(true);
+      expect(bar.cell[0].startsWith('#'), 'bar on the left edge').toBe(true);
+      expect(barWidth, 'bar width in device pixels').toBe(2 * dpr);
+
+      const underline = await read('underline');
+      expect(underline.neighbours, 'underline outside its cell').toBe(0);
+      const rows = underline.cell.length;
+      const ulRows = underline.cell.filter(full).length;
+      expect(underline.cell.slice(rows - ulRows).every(full), `underline:\n${underline.cell.join('\n')}`).toBe(true);
+      expect(underline.cell.slice(0, rows - ulRows).every(empty)).toBe(true);
+      expect(ulRows, 'underline height in device pixels').toBe(2 * dpr);
+
+      const outline = await read('outline');
+      expect(outline.neighbours, 'outline outside its cell').toBe(0);
+      const c = outline.cell;
+      const w = c[0].length;
+      const h = c.length;
+      const shown = c.join('\n');
+      for (let i = 0; i < dpr; i++) {
+        expect(full(c[i]) && full(c[h - 1 - i]), `outline top and bottom edges:\n${shown}`).toBe(true);
+        expect(full(column(c, i)) && full(column(c, w - 1 - i)), `outline side edges:\n${shown}`).toBe(true);
+      }
+      for (let y = dpr; y < h - dpr; y++) {
+        expect(c[y].slice(dpr, w - dpr), `outline interior row ${y}:\n${shown}`).toMatch(/^\.+$/);
+      }
+    });
+  }
+}

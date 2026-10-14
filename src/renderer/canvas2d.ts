@@ -543,6 +543,15 @@ export class Canvas2DRenderer implements Renderer {
       case 'underline':
         ctx.fillRect(x, y + this.cellH - thickness, this.cellW, thickness);
         break;
+      case 'outline': {
+        // One device pixel per CSS pixel, the weight of the cell grid itself.
+        const edge = Math.max(1, Math.round(this.dpr));
+        ctx.fillRect(x, y, this.cellW, edge);
+        ctx.fillRect(x, y + this.cellH - edge, this.cellW, edge);
+        ctx.fillRect(x, y + edge, edge, this.cellH - 2 * edge);
+        ctx.fillRect(x + this.cellW - edge, y + edge, edge, this.cellH - 2 * edge);
+        break;
+      }
       case 'block':
       default: {
         ctx.fillRect(x, y, this.cellW, this.cellH);
@@ -701,7 +710,7 @@ export class Canvas2DRenderer implements Renderer {
 }
 
 function cursorShapeBit(shape: string): number {
-  return shape === 'bar' ? 1 : shape === 'underline' ? 2 : 0;
+  return shape === 'bar' ? 1 : shape === 'underline' ? 2 : shape === 'outline' ? 3 : 0;
 }
 
 /** Everything about the cursor that changes which pixels it occupies. */

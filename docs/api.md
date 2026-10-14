@@ -95,7 +95,9 @@ interface CursorState {
   x: number;                             // 0-based column
   y: number;                             // absolute buffer row
   visible: boolean;
-  shape: 'block' | 'bar' | 'underline';
+  // 'outline' is a hollow block: the cell's border only, for a window
+  // without the focus.
+  shape: 'block' | 'bar' | 'underline' | 'outline';
 }
 ```
 

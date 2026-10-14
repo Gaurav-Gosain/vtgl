@@ -284,7 +284,7 @@ The rules an implementation must honour:
 - **`flags`** is a bitfield of `CellFlags`: `BOLD`, `ITALIC`, `UNDERLINE`, `STRIKETHROUGH`, `INVERSE`, `INVISIBLE`, `BLINK`, `FAINT`. The values match ghostty-vt's layout, so the reference adapter passes wasm flags through unchanged.
 - **`isRowDirty` is read-only for the renderer.** Whoever drives the source clears dirty state, out of band from `render()`.
 
-`getCursor()` returns `{ x, y, visible, shape }`, where `x` is a 0-based column and `y` is an absolute buffer row. Both backends honour `visible` and `shape`. There is no `blink` field, because the renderer has no clock to blink against; a host that wants a blinking cursor owns the timer:
+`getCursor()` returns `{ x, y, visible, shape }`, where `x` is a 0-based column and `y` is an absolute buffer row. Both backends honour `visible` and `shape`. `shape` is `block`, `bar`, `underline` or `outline`. An outline is a hollow block, which a host shows when its terminal does not have the focus. There is no `blink` field, because the renderer has no clock to blink against; a host that wants a blinking cursor owns the timer:
 
 ```js
 setInterval(() => {
