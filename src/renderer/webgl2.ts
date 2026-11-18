@@ -740,7 +740,15 @@ export class WebGL2Renderer implements Renderer {
       gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.atlas!.texture);
       gl.uniform1i(p.u.u_atlas, 0);
       gl.bindVertexArray(this.cursorGlyphVao);
+      // Clip the overpaint to the cursor's cell. The glyph may be wider than
+      // the cursor (a wide character is one 2-cell glyph, the cursor one cell;
+      // an outline tile may overhang), and outside the cursor rect it would
+      // paint the cursor-text colour over the cell's own glyph, erasing it.
+      // Scissor y counts from the bottom of the drawing buffer.
+      gl.enable(gl.SCISSOR_TEST);
+      gl.scissor(x, this.rows * this.cellH - y - this.cellH, this.cellW, this.cellH);
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, 1);
+      gl.disable(gl.SCISSOR_TEST);
       calls++;
     }
     return calls;
