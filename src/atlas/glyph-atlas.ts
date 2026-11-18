@@ -296,6 +296,9 @@ export function isPowerlineSeparator(grapheme: string): boolean {
  * A glyph is "colored" if enough opaque-ish pixels carry real chroma. White
  * text (grayscale AA) has equal channels, so it never trips this; emoji do.
  */
+// A pixel whose brightest channel is below this is not white text (detectColored).
+const NOT_WHITE = 208;
+
 function detectColored(data: Uint8ClampedArray): boolean {
   let colorful = 0;
   for (let i = 0; i < data.length; i += 4) {
@@ -306,7 +309,13 @@ function detectColored(data: Uint8ClampedArray): boolean {
     const bb = data[i + 2];
     const max = Math.max(rr, gg, bb);
     const min = Math.min(rr, gg, bb);
-    if (max - min > 24) {
+    // A pixel darker than white counts too. Monochrome glyphs are rastered in
+    // white, and getImageData returns un-premultiplied colour, so their pixels
+    // stay white at any coverage. A colour glyph drawn in greys (Noto Color
+    // Emoji's family sequences such as U+1F468 U+200D U+1F469 U+200D U+1F467,
+    // a grey tile with figures on it) has no chroma, and was tinted as
+    // coverage: a box in the foreground colour.
+    if (max - min > 24 || max < NOT_WHITE) {
       colorful++;
       if (colorful > 4) return true;
     }
