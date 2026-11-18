@@ -289,7 +289,25 @@ export class InstanceBuffers {
       // Atlas rect (texels == device px), no per-cell offset in the default path.
       this.glyphF32[gBase + 0] = rect.x;
       this.glyphF32[gBase + 1] = rect.y;
-      this.glyphF32[gBase + 2] = rect.w;
+      // A single-width glyph whose ink runs past its cell has a two-cell slot
+      // (atlas/glyph-atlas.ts, ensureSingle). Its quad spans both cells only
+      // when the next cell of the row is blank: width 1 and codepoint 0 or 32
+      // (an invisible cell reads 0). Otherwise the quad is cut to this cell,
+      // which samples the slot's left half. The glyph pass runs after the
+      // background pass, so the spilled half shows over the next cell's own
+      // background (or selection), as on a 2D canvas; the next cell's
+      // decorations and a cursor on it are drawn after it, over it. Never past
+      // the last column. Both cells are in this row, so a change to either
+      // dirties the row and this decision is made again.
+      let quadW = rect.w;
+      if (spanCols === 1 && !isShaped && rect.w > this.cellW) {
+        const next = col + 1;
+        const nextCp = next < cols ? line.codepoint(next) : -1;
+        if (next >= cols || line.width(next) !== 1 || (nextCp !== 0 && nextCp !== 32)) {
+          quadW = this.cellW;
+        }
+      }
+      this.glyphF32[gBase + 2] = quadW;
       this.glyphF32[gBase + 3] = rect.h;
       // An outline glyph places its tile so the cluster's pen origin lands at
       // (col*cellW + xOffset, baseline + yOffset); the quad is the tile, which

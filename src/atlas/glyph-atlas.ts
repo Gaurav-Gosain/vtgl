@@ -95,12 +95,55 @@ export class GlyphAtlas implements GlyphProvider {
     // variants of a border character in one slot instead of four.
     const sprite = hint === undefined && isBoxDrawingGrapheme(grapheme);
     const key = hint ? hint.key : atlasKey(grapheme, sprite ? 0 : styleMask);
+    // A single-width glyph is measured before it is slotted; see ensureSingle.
+    if (hint === undefined && !sprite && widthCols <= 1) {
+      return this.ensureSingle(key, grapheme, styleMask);
+    }
     const res = this.packer.alloc(key, slotW, slotH, false);
     if (res === null) return null;
     if (res.isNew) {
       res.entry.colored = this.raster(grapheme, styleMask, slotW, slotH, res.entry.page, res.entry.x, res.entry.y, hint);
     }
     const e = res.entry;
+    return { x: e.x, y: e.y, w: e.w, h: e.h, colored: e.colored, page: e.page };
+  }
+
+  // Overflow slots for single-width glyphs whose ink runs past their cell.
+  //
+  // A font may draw a glyph the VT gives one cell wider than that cell (icon
+  // fonts' private-use glyphs, a colour emoji in text presentation, an italic
+  // overhang). On a miss the glyph is rastered into the scratch surface two
+  // cells wide, once, and its ink measured there: if any column at or past
+  // cellW has a pixel with alpha >= OVERFLOW_ALPHA, the glyph gets a two-cell
+  // slot (2 * cellW), otherwise a one-cell slot as before. The result belongs
+  // to the atlas entry, so it is decided once per grapheme + style mask (the
+  // atlas key) and never on the per-frame path; a hit costs one map lookup as
+  // before. Powerline separators (U+E0B0..U+E0D7) always get one cell: they
+  // are drawn to fill their cell and meet the next segment's background, and
+  // any overshoot there would bleed into that segment. Ink left of the cell
+  // and past two cells is still clipped. Whether the second cell is drawn is
+  // decided per cell by the instance builder (renderer/instances.ts): only
+  // when the next cell is blank.
+  private ensureSingle(key: string, grapheme: string, styleMask: number): AtlasRect | null {
+    const hit = this.packer.get(key);
+    if (hit) return { x: hit.x, y: hit.y, w: hit.w, h: hit.h, colored: hit.colored, page: hit.page };
+    const cellW = this.font.cellW;
+    const cellH = this.font.cellH;
+    const wide = 2 * cellW;
+    const ctx = this.font.ctx;
+    ctx.clearRect(0, 0, wide, cellH);
+    ctx.font = this.font.fontFor(styleMask);
+    ctx.textBaseline = 'alphabetic';
+    ctx.textAlign = 'left';
+    ctx.direction = 'ltr';
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(grapheme, 0, this.font.baseline);
+    const ink = ctx.getImageData(0, 0, wide, cellH).data;
+    const slotW = !isPowerlineSeparator(grapheme) && inkPast(ink, wide, cellH, cellW) ? wide : cellW;
+    const res = this.packer.alloc(key, slotW, cellH, false);
+    if (res === null) return null;
+    const e = res.entry;
+    if (res.isNew) e.colored = detectColored(this.upload(slotW, cellH, e.page, e.x, e.y));
     return { x: e.x, y: e.y, w: e.w, h: e.h, colored: e.colored, page: e.page };
   }
 
@@ -226,10 +269,36 @@ export class GlyphAtlas implements GlyphProvider {
   }
 }
 
+// What counts as ink past the cell (see GlyphAtlas.ensureSingle).
+
+/** Alpha from which a pixel past the cell counts as ink (fainter is AA dust). */
+export const OVERFLOW_ALPHA = 16;
+
+/** True when an RGBA raster `w` x `h` has ink at or right of column `from`. */
+export function inkPast(data: Uint8ClampedArray, w: number, h: number, from: number): boolean {
+  for (let y = 0; y < h; y++) {
+    const row = y * w * 4;
+    for (let x = from; x < w; x++) {
+      if (data[row + x * 4 + 3] >= OVERFLOW_ALPHA) return true;
+    }
+  }
+  return false;
+}
+
+/** Powerline and Powerline Extra separators: U+E0B0..U+E0D7. */
+export function isPowerlineSeparator(grapheme: string): boolean {
+  if (grapheme.length !== 1) return false;
+  const cp = grapheme.charCodeAt(0);
+  return cp >= 0xe0b0 && cp <= 0xe0d7;
+}
+
 /**
  * A glyph is "colored" if enough opaque-ish pixels carry real chroma. White
  * text (grayscale AA) has equal channels, so it never trips this; emoji do.
  */
+// A pixel whose brightest channel is below this is not white text (detectColored).
+const NOT_WHITE = 208;
+
 function detectColored(data: Uint8ClampedArray): boolean {
   let colorful = 0;
   for (let i = 0; i < data.length; i += 4) {
@@ -240,7 +309,13 @@ function detectColored(data: Uint8ClampedArray): boolean {
     const bb = data[i + 2];
     const max = Math.max(rr, gg, bb);
     const min = Math.min(rr, gg, bb);
-    if (max - min > 24) {
+    // A pixel darker than white counts too. Monochrome glyphs are rastered in
+    // white, and getImageData returns un-premultiplied colour, so their pixels
+    // stay white at any coverage. A colour glyph drawn in greys (Noto Color
+    // Emoji's family sequences such as U+1F468 U+200D U+1F469 U+200D U+1F467,
+    // a grey tile with figures on it) has no chroma, and was tinted as
+    // coverage: a box in the foreground colour.
+    if (max - min > 24 || max < NOT_WHITE) {
       colorful++;
       if (colorful > 4) return true;
     }
